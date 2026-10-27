@@ -43,6 +43,9 @@ minikube delete
 | [`step-6-configmap`](../../tree/step-6-configmap) | Le ConfigMap |
 | [`step-7-secret`](../../tree/step-7-secret) | Le Secret |
 | [`step-8-database-pv`](../../tree/step-8-database-pv) | PersistentVolume / PersistentVolumeClaim + une vraie base de données |
+| [`step-9-statefulset`](../../tree/step-9-statefulset) | Le StatefulSet |
+| [`step-10-ingress`](../../tree/step-10-ingress) | L'Ingress |
+| [`step-11-helm`](../../tree/step-11-helm) | Helm |
 
 Chaque branche a, à sa racine, un fichier **`STEP.md`** qui explique :
 - le concept introduit, pourquoi il existe et le problème qu'il résout,
