@@ -26,6 +26,16 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 80
+          env:
+            - name: WELCOME_MESSAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: web-content
+                  key: WELCOME_MESSAGE
+          volumeMounts:
+            - name: web-content
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
           readinessProbe:
             httpGet:
               path: /
@@ -38,3 +48,7 @@ spec:
               port: 80
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        - name: web-content
+          configMap:
+            name: web-content

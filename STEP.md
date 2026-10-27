@@ -1,77 +1,108 @@
-# Étape 5 — Le Namespace
+# Étape 6 — Le ConfigMap
 
-Jusqu'ici, tout ce qu'on a créé vivait dans le namespace `default`. Un
-**Namespace** est une façon de partitionner un cluster : les noms de
-ressources (Deployment, Service...) doivent être uniques *dans* un
-namespace, mais pas entre namespaces différents. Ça sert à isoler des
-environnements (dev/staging/prod), des équipes, ou simplement à garder
-un cluster personnel bien rangé.
-
-Attention : **tout n'est pas namespacé**. Les Namespaces eux-mêmes, les
-Nodes, les PersistentVolumes (pas les PVC !), ou les ClusterRoles sont
-des ressources *cluster-wide*. La commande `kubectl api-resources
---namespaced=true` liste ce qui est namespacé ou pas.
+Jusqu'ici, la seule façon de changer le contenu de la page était de
+reconstruire l'image Docker. Un **ConfigMap** permet d'injecter de la
+configuration (ou même des fichiers entiers) dans un Pod *sans toucher à
+l'image* — pratique pour changer un comportement entre dev/staging/prod,
+ou pour itérer sans rebuild.
 
 ## Nouveau fichier
 
-- `k8s/namespace.yaml` — crée le namespace `tutorial-app`.
+- `k8s/configmap.yaml` — contient deux clés :
+  - `WELCOME_MESSAGE` : une simple valeur texte,
+  - `index.html` : un fichier HTML complet (une ConfigMap peut stocker
+    n'importe quel fichier texte, pas seulement des paires clé/valeur
+    courtes — limite : 1 MiB au total par ConfigMap).
 
-Et les fichiers existants ont tous reçu `namespace: tutorial-app` dans
-leur `metadata` (`deployment.yaml`, `service-clusterip.yaml` et les
-variantes de l'étape précédente).
+Et `k8s/deployment.yaml` a été modifié pour la consommer, **des deux
+façons possibles** :
 
-## Nettoyer l'étape précédente et repartir dans le bon namespace
+### 1. Comme variable d'environnement
 
-Si tu as encore les ressources de l'étape 4 dans `default` :
-
-```bash
-kubectl delete deployment web
-kubectl delete service web
+```yaml
+env:
+  - name: WELCOME_MESSAGE
+    valueFrom:
+      configMapKeyRef:
+        name: web-content
+        key: WELCOME_MESSAGE
 ```
 
-Puis :
+(Il existe aussi `envFrom: configMapRef:` pour injecter *toutes* les
+clés d'un coup comme variables d'env — on ne l'utilise pas ici parce que
+la clé `index.html` n'est pas un nom de variable d'environnement valide.)
 
-```bash
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/deployment.yaml -f k8s/service-clusterip.yaml
-kubectl get all -n tutorial-app
+### 2. Comme fichier monté (volume)
+
+```yaml
+volumeMounts:
+  - name: web-content
+    mountPath: /usr/share/nginx/html/index.html
+    subPath: index.html
+volumes:
+  - name: web-content
+    configMap:
+      name: web-content
 ```
 
-Pratique pour ne plus taper `-n tutorial-app` à chaque commande, pendant
-toute la suite du tutoriel :
+Le `subPath` permet de monter **une seule clé** de la ConfigMap sur un
+fichier précis, sans écraser tout le dossier `/usr/share/nginx/html/`
+(sans `subPath`, le volume remplacerait tout le contenu du dossier par
+les clés de la ConfigMap).
+
+## Essayer
 
 ```bash
-kubectl config set-context --current --namespace=tutorial-app
-kubectl get pods   # plus besoin de -n
+kubectl apply -f k8s/configmap.yaml -f k8s/deployment.yaml
+kubectl rollout status deployment/web -n tutorial-app
+kubectl port-forward -n tutorial-app service/web 8080:80
 ```
 
-(Pour revenir au namespace par défaut : `kubectl config set-context
---current --namespace=default`.)
+Ouvre http://localhost:8080 : la page vient maintenant de la ConfigMap,
+alors que l'image Docker utilisée est **exactement la même** qu'à
+l'étape 0.
 
-## DNS entre namespaces
+Vérifie la variable d'environnement :
 
-Un Service est joignable depuis n'importe quel namespace via son nom
-complet : `<service>.<namespace>.svc.cluster.local` (souvent raccourci en
-`<service>.<namespace>`). Depuis un Pod du même namespace, le simple nom
-`web` suffit déjà (comme utilisé à l'étape 4).
+```bash
+kubectl exec -n tutorial-app deploy/web -- env | grep WELCOME_MESSAGE
+```
 
-## Limiter les ressources d'un namespace (pour info, pas appliqué ici)
+## Démonstration : mettre à jour sans toucher à l'image
 
-Deux objets qu'on croise souvent en vrai, pour éviter qu'un namespace
-épuise tout le cluster :
+```bash
+kubectl edit configmap web-content -n tutorial-app
+# change le texte de index.html, sauvegarde
+```
 
-- **`ResourceQuota`** : plafonne le total de CPU/mémoire/nombre d'objets
-  pour tout le namespace.
-- **`LimitRange`** : impose des valeurs par défaut ou des bornes
-  (min/max) de CPU/mémoire *par Pod/conteneur* dans le namespace.
+Le fichier monté en volume se met à jour **tout seul** après quelques
+secondes à quelques minutes (le kubelet resynchronise périodiquement),
+sans redémarrer le Pod — rafraîchis la page. En revanche, la variable
+d'environnement, elle, **ne changera pas** dans les Pods déjà démarrés :
+les variables d'env sont figées au démarrage du conteneur. Il faut un
+nouveau rollout (`kubectl rollout restart deployment/web -n
+tutorial-app`) pour qu'elle soit reprise.
 
-On ne les configure pas dans ce tuto pour rester focalisé, mais c'est le
-genre de chose qu'un cluster partagé en entreprise impose presque
-toujours.
+C'est une distinction importante à retenir : *volume monté* = mise à
+jour "live" ; *variable d'environnement* = fige au démarrage.
+
+## Autres détails utiles
+
+- `kubectl create configmap mon-config --from-file=chemin/fichier.conf`
+  permet de créer une ConfigMap directement depuis un fichier, sans
+  écrire le YAML à la main.
+- Une ConfigMap peut être marquée `immutable: true` : Kubernetes refuse
+  alors toute modification (il faut en créer une nouvelle avec un autre
+  nom). Ça évite des mises à jour accidentelles, et accélère un peu les
+  performances du cluster sur de gros clusters.
+- Une ConfigMap **n'est pas chiffrée** et est lisible par quiconque a le
+  droit de lire les ConfigMaps du namespace. Pour une information
+  sensible (mot de passe, token, clé API), il faut un **Secret** — c'est
+  l'étape suivante.
 
 ## Étape suivante
 
 ```bash
-git checkout step-6-configmap
+git checkout step-7-secret
 cat STEP.md
 ```
