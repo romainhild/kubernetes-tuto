@@ -1,108 +1,102 @@
-# Étape 6 — Le ConfigMap
+# Étape 7 — Le Secret
 
-Jusqu'ici, la seule façon de changer le contenu de la page était de
-reconstruire l'image Docker. Un **ConfigMap** permet d'injecter de la
-configuration (ou même des fichiers entiers) dans un Pod *sans toucher à
-l'image* — pratique pour changer un comportement entre dev/staging/prod,
-ou pour itérer sans rebuild.
+Un **Secret** ressemble énormément à un ConfigMap (même structure, même
+façon de le consommer en env var ou en volume) — mais il existe une
+différence de fond à bien comprendre tout de suite :
+
+> **Un Secret n'est PAS chiffré par défaut.** Ses valeurs sont juste
+> encodées en base64 dans etcd (la base de données du cluster) — le
+> base64 est un encodage, pas un chiffrement, n'importe qui peut le
+> décoder instantanément. La vraie protection vient d'ailleurs :
+> - le chiffrement au repos dans etcd doit être activé explicitement par
+>   l'administrateur du cluster (`--encryption-provider-config`),
+> - et le RBAC doit restreindre qui a le droit de lire les Secrets
+>   (`get`/`list` sur la ressource `secrets`).
+>
+> Dans beaucoup d'organisations, les vrais secrets de prod ne sont de
+> toute façon pas stockés en clair dans un manifeste Kubernetes, mais
+> injectés depuis un gestionnaire externe (Vault, AWS Secrets Manager,
+> Sealed Secrets, External Secrets Operator...).
 
 ## Nouveau fichier
 
-- `k8s/configmap.yaml` — contient deux clés :
-  - `WELCOME_MESSAGE` : une simple valeur texte,
-  - `index.html` : un fichier HTML complet (une ConfigMap peut stocker
-    n'importe quel fichier texte, pas seulement des paires clé/valeur
-    courtes — limite : 1 MiB au total par ConfigMap).
+- `k8s/secret.yaml` — un Secret `Opaque` (le type "générique", pour une
+  donnée sans structure particulière) contenant un faux token d'API.
 
-Et `k8s/deployment.yaml` a été modifié pour la consommer, **des deux
-façons possibles** :
+On utilise ici `stringData` plutôt que `data` : avec `stringData`, tu
+écris la valeur en clair dans le YAML et Kubernetes l'encode en base64
+pour toi au moment de la création. Avec `data`, tu dois fournir toi-même
+la valeur déjà encodée (`echo -n "valeur" | base64`). `stringData` est
+en écriture seule — en relisant le Secret (`kubectl get secret ... -o
+yaml`), tu verras toujours la version encodée sous `data`.
 
-### 1. Comme variable d'environnement
-
-```yaml
-env:
-  - name: WELCOME_MESSAGE
-    valueFrom:
-      configMapKeyRef:
-        name: web-content
-        key: WELCOME_MESSAGE
-```
-
-(Il existe aussi `envFrom: configMapRef:` pour injecter *toutes* les
-clés d'un coup comme variables d'env — on ne l'utilise pas ici parce que
-la clé `index.html` n'est pas un nom de variable d'environnement valide.)
-
-### 2. Comme fichier monté (volume)
+Et `k8s/deployment.yaml` consomme ce Secret exactement comme la
+ConfigMap, via `secretKeyRef` :
 
 ```yaml
-volumeMounts:
-  - name: web-content
-    mountPath: /usr/share/nginx/html/index.html
-    subPath: index.html
-volumes:
-  - name: web-content
-    configMap:
-      name: web-content
+- name: API_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: web-secret
+      key: API_TOKEN
 ```
-
-Le `subPath` permet de monter **une seule clé** de la ConfigMap sur un
-fichier précis, sans écraser tout le dossier `/usr/share/nginx/html/`
-(sans `subPath`, le volume remplacerait tout le contenu du dossier par
-les clés de la ConfigMap).
 
 ## Essayer
 
 ```bash
-kubectl apply -f k8s/configmap.yaml -f k8s/deployment.yaml
+kubectl apply -f k8s/secret.yaml
+kubectl apply -f k8s/deployment.yaml
 kubectl rollout status deployment/web -n tutorial-app
-kubectl port-forward -n tutorial-app service/web 8080:80
 ```
 
-Ouvre http://localhost:8080 : la page vient maintenant de la ConfigMap,
-alors que l'image Docker utilisée est **exactement la même** qu'à
-l'étape 0.
-
-Vérifie la variable d'environnement :
+Regarde le Secret tel que stocké :
 
 ```bash
-kubectl exec -n tutorial-app deploy/web -- env | grep WELCOME_MESSAGE
+kubectl get secret web-secret -n tutorial-app -o yaml
 ```
 
-## Démonstration : mettre à jour sans toucher à l'image
+La valeur apparaît encodée en base64. Décode-la pour constater qu'il
+n'y a aucune protection cryptographique :
 
 ```bash
-kubectl edit configmap web-content -n tutorial-app
-# change le texte de index.html, sauvegarde
+kubectl get secret web-secret -n tutorial-app -o jsonpath='{.data.API_TOKEN}' | base64 -d
 ```
 
-Le fichier monté en volume se met à jour **tout seul** après quelques
-secondes à quelques minutes (le kubelet resynchronise périodiquement),
-sans redémarrer le Pod — rafraîchis la page. En revanche, la variable
-d'environnement, elle, **ne changera pas** dans les Pods déjà démarrés :
-les variables d'env sont figées au démarrage du conteneur. Il faut un
-nouveau rollout (`kubectl rollout restart deployment/web -n
-tutorial-app`) pour qu'elle soit reprise.
+Et vérifie que le Pod a bien reçu la valeur en clair en variable d'env
+(c'est le conteneur qui la voit en clair, le chiffrement/RBAC protège
+l'accès *au Secret lui-même*, pas son utilisation dans le Pod) :
 
-C'est une distinction importante à retenir : *volume monté* = mise à
-jour "live" ; *variable d'environnement* = fige au démarrage.
+```bash
+kubectl exec -n tutorial-app deploy/web -- env | grep API_TOKEN
+```
 
-## Autres détails utiles
+## Les autres types de Secret
 
-- `kubectl create configmap mon-config --from-file=chemin/fichier.conf`
-  permet de créer une ConfigMap directement depuis un fichier, sans
-  écrire le YAML à la main.
-- Une ConfigMap peut être marquée `immutable: true` : Kubernetes refuse
-  alors toute modification (il faut en créer une nouvelle avec un autre
-  nom). Ça évite des mises à jour accidentelles, et accélère un peu les
-  performances du cluster sur de gros clusters.
-- Une ConfigMap **n'est pas chiffrée** et est lisible par quiconque a le
-  droit de lire les ConfigMaps du namespace. Pour une information
-  sensible (mot de passe, token, clé API), il faut un **Secret** — c'est
-  l'étape suivante.
+Le `type` d'un Secret ne change pas le stockage (toujours juste du
+base64), mais aide Kubernetes et les outils à valider sa structure :
+
+- **`Opaque`** (défaut) : structure libre, clé/valeur quelconques.
+- **`kubernetes.io/tls`** : attend exactement les clés `tls.crt` et
+  `tls.key` — c'est le format qu'un Ingress consomme pour servir du
+  HTTPS. Exemple de forme (non appliqué) dans
+  `k8s/secret-tls-example.yaml`.
+- **`kubernetes.io/dockerconfigjson`** : credentials pour tirer une
+  image depuis un registry Docker privé (`imagePullSecrets` sur un
+  Pod).
+- **`kubernetes.io/basic-auth`** / **`kubernetes.io/ssh-auth`** :
+  structures prédéfinies pour des identifiants basic-auth ou une clé SSH.
+- **`kubernetes.io/service-account-token`** : créé automatiquement par
+  Kubernetes pour authentifier un Pod auprès de l'API server.
+
+## Ce qu'on va en faire ensuite
+
+À l'étape suivante, on ajoute une vraie base de données — et son mot de
+passe sera, sans surprise, stocké dans un Secret plutôt qu'une
+ConfigMap.
 
 ## Étape suivante
 
 ```bash
-git checkout step-7-secret
+git checkout step-8-database-pv
 cat STEP.md
 ```

@@ -32,6 +32,11 @@ spec:
                 configMapKeyRef:
                   name: web-content
                   key: WELCOME_MESSAGE
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: web-secret
+                  key: API_TOKEN
           volumeMounts:
             - name: web-content
               mountPath: /usr/share/nginx/html/index.html
