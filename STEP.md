@@ -1,76 +1,85 @@
-# Étape 2 — Le ReplicaSet
+# Étape 3 — Le Deployment
 
-Un **ReplicaSet** garantit qu'un nombre donné de Pods identiques (définis
-par un `template`) tournent en permanence. Si un Pod meurt, est supprimé,
-ou si le nœud qui l'hébergeait tombe, le ReplicaSet en recrée un nouveau
-pour revenir au compte demandé (`replicas`).
-
-Le lien entre le ReplicaSet et "ses" Pods se fait uniquement par
-**labels** : le `selector.matchLabels` du ReplicaSet (`app: web`) doit
-correspondre aux labels du `template`. C'est ce mécanisme de label/selector
-qu'on va retrouver partout dans Kubernetes (Deployment, Service...).
+Un **Deployment** ne gère pas directement des Pods : il gère des
+**ReplicaSets**, et sait faire la transition entre deux versions d'un
+ReplicaSet sans coupure de service. C'est la ressource que tu utiliseras
+le plus souvent au quotidien pour des applications sans état (stateless).
 
 ## Nouveau fichier
 
-- `k8s/replicaset.yaml` — remplace `k8s/pod.yaml`. Demande 3 réplicas du
-  même Pod que l'étape précédente.
-
-(Image toujours disponible dans minikube depuis l'étape 1 — si tu as
-fait `minikube delete` entre-temps, relance `minikube image build -t
-local/k8s-tutorial-web:dev app/`.)
+- `k8s/deployment.yaml` — remplace `k8s/replicaset.yaml`. Même template
+  de Pod, mais avec une stratégie de mise à jour explicite, plus deux
+  "probes" (voir plus bas).
 
 ## Essayer
 
 ```bash
-kubectl apply -f k8s/replicaset.yaml
-kubectl get replicaset
-kubectl get pods -o wide --show-labels
+kubectl apply -f k8s/deployment.yaml
+kubectl get deployments,replicasets,pods
 ```
 
-Tu dois voir 3 Pods, tous avec le label `app=web`, nommés
-`web-xxxxx` (suffixe aléatoire).
+Remarque : le Deployment a créé un ReplicaSet (nommé `web-<hash>`) qui a
+lui-même créé les 3 Pods. Trois niveaux : Deployment → ReplicaSet → Pod.
 
-## Démonstration : l'auto-réparation
+## Démonstration : une mise à jour sans coupure
 
-Supprime un des trois Pods (remplace par un nom réel de ta machine) :
+Modifie `app/index.html` (par exemple change le texte), reconstruis
+l'image avec un **nouveau tag** :
 
 ```bash
-kubectl delete pod web-<suffixe>
-kubectl get pods -w
+minikube image build -t local/k8s-tutorial-web:v2 app/
 ```
 
-Un nouveau Pod apparaît presque immédiatement pour revenir à 3. C'est la
-différence fondamentale avec l'étape 1.
-
-## Démonstration : le scaling
+Édite `k8s/deployment.yaml` pour utiliser `local/k8s-tutorial-web:v2`,
+puis :
 
 ```bash
-kubectl scale replicaset web --replicas=5
-kubectl get pods
-kubectl scale replicaset web --replicas=2
-kubectl get pods
+kubectl apply -f k8s/deployment.yaml
+kubectl rollout status deployment/web
+kubectl get replicasets
 ```
 
-## La limite du ReplicaSet
+Tu vas voir un **nouveau** ReplicaSet monter en puissance pendant que
+l'ancien redescend — jamais plus de `replicas + maxSurge` Pods au total,
+jamais moins de `replicas - maxUnavailable` Pods disponibles. C'est
+réglé ici en `maxSurge: 1` / `maxUnavailable: 0` : zéro interruption,
+au prix d'un Pod temporairement en plus.
 
-Essaie de changer quelque chose dans `app/index.html`, reconstruis
-l'image avec le **même tag** (`local/k8s-tutorial-web:dev`), puis
-réapplique le ReplicaSet : rien ne se passe, les Pods existants ne sont
-pas recréés, car le ReplicaSet ne surveille que le *nombre* de Pods, pas
-leur contenu. Pour changer la version qui tourne, il faudrait supprimer
-les Pods à la main un par un (en gérant soi-même la bascule pour éviter
-une coupure de service) — fastidieux et risqué.
+## Les stratégies de mise à jour
 
-C'est exactement le problème que le **Deployment** résout : il pilote un
-(ou plusieurs) ReplicaSet(s) pour toi et sait faire des mises à jour
-progressives sans interruption de service.
+- **`RollingUpdate`** (par défaut) : remplace les Pods progressivement.
+  - `maxSurge` : combien de Pods en plus du compte demandé peuvent
+    exister pendant la transition (en nombre ou en %).
+  - `maxUnavailable` : combien de Pods peuvent être indisponibles pendant
+    la transition.
+- **`Recreate`** : détruit tous les anciens Pods avant de créer les
+  nouveaux. Coupure de service garantie, mais utile quand deux versions
+  ne peuvent pas cohabiter (ex: migration de schéma de base incompatible).
 
-En pratique, comme pour le Pod, on crée très rarement un ReplicaSet
-directement — on passe quasi systématiquement par un Deployment.
+## Revenir en arrière
+
+```bash
+kubectl rollout history deployment/web
+kubectl rollout undo deployment/web
+```
+
+## Les probes (pourquoi elles comptent ici)
+
+- **`readinessProbe`** : tant qu'elle échoue, le Pod n'est pas considéré
+  "prêt" — il ne reçoit pas de trafic (via un Service, étape suivante) et
+  n'est pas compté dans le calcul du rolling update. C'est ce qui permet
+  au Deployment de savoir qu'un nouveau Pod est vraiment prêt avant de
+  couper l'ancien.
+- **`livenessProbe`** : si elle échoue de façon répétée, Kubernetes tue
+  et redémarre le conteneur. Utile si l'appli peut se retrouver "bloquée"
+  sans crasher.
 
 ## Étape suivante
 
 ```bash
-git checkout step-3-deployment
+git checkout step-4-service
 cat STEP.md
 ```
+
+Pour l'instant on accède toujours à l'appli via `kubectl port-forward`.
+On va enfin exposer ça proprement avec un **Service**.
