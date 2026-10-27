@@ -1,81 +1,76 @@
-# Étape 1 — Le Pod
+# Étape 2 — Le ReplicaSet
 
-Un **Pod** est la plus petite unité que Kubernetes sait déployer. Ce n'est
-pas directement "un conteneur" : c'est une enveloppe qui peut contenir un
-ou plusieurs conteneurs qui partagent le même réseau (même IP, mêmes
-ports) et peuvent partager des volumes. Dans l'immense majorité des cas on
-met un seul conteneur "principal" par Pod, et on ajoute un deuxième
-conteneur seulement pour un rôle d'accompagnement (un "sidecar" : proxy,
-agent de logs, synchronisation de fichiers...).
+Un **ReplicaSet** garantit qu'un nombre donné de Pods identiques (définis
+par un `template`) tournent en permanence. Si un Pod meurt, est supprimé,
+ou si le nœud qui l'hébergeait tombe, le ReplicaSet en recrée un nouveau
+pour revenir au compte demandé (`replicas`).
+
+Le lien entre le ReplicaSet et "ses" Pods se fait uniquement par
+**labels** : le `selector.matchLabels` du ReplicaSet (`app: web`) doit
+correspondre aux labels du `template`. C'est ce mécanisme de label/selector
+qu'on va retrouver partout dans Kubernetes (Deployment, Service...).
 
 ## Nouveau fichier
 
-- `k8s/pod.yaml` — décrit un Pod nommé `web`, basé sur notre image Docker
-  de l'étape 0, qui écoute sur le port 80.
+- `k8s/replicaset.yaml` — remplace `k8s/pod.yaml`. Demande 3 réplicas du
+  même Pod que l'étape précédente.
 
-## Rendre l'image disponible à minikube
-
-minikube tourne dans sa propre VM/conteneur, avec son propre daemon
-Docker — il ne voit pas les images de ton Docker local. Il faut donc lui
-donner l'image explicitement :
-
-```bash
-minikube image build -t local/k8s-tutorial-web:dev app/
-```
-
-C'est pour ça que le Pod utilise `imagePullPolicy: Never` : on dit à
-Kubernetes "ne va jamais chercher cette image sur un registry, elle est
-déjà là en local".
-
-(Alternative possible : `eval $(minikube docker-env)` puis un `docker
-build` classique — ça bascule ton terminal pour pointer vers le daemon
-Docker de minikube.)
+(Image toujours disponible dans minikube depuis l'étape 1 — si tu as
+fait `minikube delete` entre-temps, relance `minikube image build -t
+local/k8s-tutorial-web:dev app/`.)
 
 ## Essayer
 
 ```bash
-kubectl apply -f k8s/pod.yaml
+kubectl apply -f k8s/replicaset.yaml
+kubectl get replicaset
+kubectl get pods -o wide --show-labels
+```
+
+Tu dois voir 3 Pods, tous avec le label `app=web`, nommés
+`web-xxxxx` (suffixe aléatoire).
+
+## Démonstration : l'auto-réparation
+
+Supprime un des trois Pods (remplace par un nom réel de ta machine) :
+
+```bash
+kubectl delete pod web-<suffixe>
+kubectl get pods -w
+```
+
+Un nouveau Pod apparaît presque immédiatement pour revenir à 3. C'est la
+différence fondamentale avec l'étape 1.
+
+## Démonstration : le scaling
+
+```bash
+kubectl scale replicaset web --replicas=5
 kubectl get pods
-kubectl describe pod web
-```
-
-Accéder à la page (minikube n'expose rien automatiquement, on fait un
-tunnel local vers le Pod) :
-
-```bash
-kubectl port-forward pod/web 8080:80
-```
-
-Ouvrir http://localhost:8080 dans un autre terminal.
-
-Voir les logs du conteneur du Pod :
-
-```bash
-kubectl logs web
-```
-
-## Le point important : un Pod ne se répare pas tout seul
-
-```bash
-kubectl delete pod web
+kubectl scale replicaset web --replicas=2
 kubectl get pods
 ```
 
-Le Pod a disparu, point final. Rien ne le recrée. C'est normal : un Pod
-seul n'a aucune notion de "combien d'instances je veux" ni de
-"relance-le s'il meurt". C'est tout l'objet de la prochaine étape.
+## La limite du ReplicaSet
 
-En pratique, on crée donc **très rarement** des Pods à la main comme on
-vient de le faire — c'est surtout utile pour du debug ponctuel
-(`kubectl run debug --image=busybox -it --rm -- sh`). Pour une vraie
-appli, on passe par un contrôleur qui gère des Pods pour nous.
+Essaie de changer quelque chose dans `app/index.html`, reconstruis
+l'image avec le **même tag** (`local/k8s-tutorial-web:dev`), puis
+réapplique le ReplicaSet : rien ne se passe, les Pods existants ne sont
+pas recréés, car le ReplicaSet ne surveille que le *nombre* de Pods, pas
+leur contenu. Pour changer la version qui tourne, il faudrait supprimer
+les Pods à la main un par un (en gérant soi-même la bascule pour éviter
+une coupure de service) — fastidieux et risqué.
+
+C'est exactement le problème que le **Deployment** résout : il pilote un
+(ou plusieurs) ReplicaSet(s) pour toi et sait faire des mises à jour
+progressives sans interruption de service.
+
+En pratique, comme pour le Pod, on crée très rarement un ReplicaSet
+directement — on passe quasi systématiquement par un Deployment.
 
 ## Étape suivante
 
 ```bash
-git checkout step-2-replicaset
+git checkout step-3-deployment
 cat STEP.md
 ```
-
-On introduit le **ReplicaSet**, qui garantit qu'un certain nombre de
-copies du Pod tournent en permanence.
