@@ -26,3 +26,6 @@ ingress:
   tls:
     enabled: false
     secretName: tuto-tls
+
+rbac:
+  create: true

@@ -1,0 +1,28 @@
+{{- if .Values.rbac.create }}
+# Role : namespaced, donne des droits uniquement dans ce namespace (contraste
+# avec ClusterRole, qui donne des droits cluster-wide -- utile par exemple
+# pour un controller qui doit surveiller des ressources dans TOUS les
+# namespaces, comme ingress-nginx ou un scraper Prometheus).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: web-pod-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+# RoleBinding : relie le Role à un "subject" (ici notre ServiceAccount).
+# Sans ce binding, le Role existe mais ne s'applique à personne.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: web
+roleRef:
+  kind: Role
+  name: web-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

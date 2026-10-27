@@ -1,175 +1,143 @@
-# Étape 11 — Helm
+# Étape 12 — RBAC
 
-On a maintenant une dizaine de fichiers YAML à appliquer dans le bon
-ordre, avec des valeurs répétées à la main entre les étapes (le nom du
-namespace, le tag d'image, le message d'accueil...). **Helm** est le
-gestionnaire de paquets de l'écosystème Kubernetes : il transforme ces
-manifestes en un **chart** templatisé, paramétrable par un seul fichier
-de valeurs, installable/désinstallable/mettable à jour comme un paquet.
+Jusqu'ici, nos Pods ne parlaient qu'à Postgres. Beaucoup d'applis réelles
+ont besoin d'appeler l'**API Kubernetes elle-même** (lister des Pods,
+lire une ConfigMap, créer un Job comme dans l'exemple Airflow qu'on a
+esquissé...). **RBAC** (Role-Based Access Control) contrôle qui a le
+droit de faire quoi sur l'API — "qui" pouvant être un humain, mais aussi
+un Pod.
 
-Pré-requis : `brew install helm`.
+## Nouveau dans l'appli
 
-## Ce qui change
+L'appli expose maintenant un troisième morceau d'info sur sa page : elle
+interroge l'API Kubernetes pour lister les autres Pods portant le label
+`app=web` (voir `get_peer_info()` dans `app/counter/app.py`, via le
+client Python officiel `kubernetes`). C'est exactement le genre d'appel
+qui déclenche RBAC.
 
-On arrête d'utiliser `k8s/*.yaml` à partir de cette étape : tout est
-remplacé par `chart/`, qui contient la même appli (ConfigMap, Secret,
-StatefulSet Postgres, Service headless, Deployment, Service, Ingress)
-sous forme de templates. Rien n'est perdu : chaque étape précédente
-reste consultable sur sa branche avec ses manifestes bruts — c'est tout
-l'intérêt d'avoir fait ce tuto avec une branche par étape.
+(Détail au passage : l'appli doit savoir dans quel namespace elle tourne
+pour filtrer les Pods. Plutôt que de le coder en dur, `chart/templates/deployment.yaml`
+utilise la **Downward API** pour l'injecter automatiquement :
+`valueFrom.fieldRef.fieldPath: metadata.namespace` — un Pod peut
+toujours connaître ses propres métadonnées sans configuration
+supplémentaire, où qu'il soit déployé.)
 
-## Anatomie du chart
+## Comment un Pod s'authentifie auprès de l'API
 
-```
-chart/
-├── Chart.yaml        # métadonnées : nom, version du chart, version de l'appli
-├── values.yaml        # les valeurs par défaut, le seul fichier que tu modifies en usage normal
-├── .helmignore         # fichiers à ignorer lors du packaging (comme un .gitignore)
-└── templates/
-    ├── configmap.yaml
-    ├── secret.yaml
-    ├── postgres-service.yaml
-    ├── postgres-statefulset.yaml
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── ingress.yaml
-    └── NOTES.txt      # affiché après install/upgrade, généré avec les valeurs utilisées
-```
+Par défaut, **chaque Pod** se voit automatiquement monter un token
+appartenant à un **ServiceAccount** (celui du namespace nommé
+`default` si tu n'en précises pas un), dans
+`/var/run/secrets/kubernetes.io/serviceaccount/`. C'est ce que
+`config.load_incluster_config()` lit côté client Python — c'est pour ça
+que notre appli n'a besoin d'aucune URL/credentials codés en dur pour
+parler à l'API : le token et l'adresse de l'API sont déjà là, injectés
+par Kubernetes lui-même.
 
-Chaque fichier sous `templates/` est un manifeste Kubernetes presque
-normal, où certaines valeurs sont remplacées par des expressions
-`{{ .Values.xxx }}` — regarde `chart/templates/deployment.yaml` : au
-lieu de `image: local/k8s-tutorial-counter:dev` en dur, on a
-`image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"`,
-dont les valeurs viennent de `chart/values.yaml`.
+Avoir un token ne donne **aucune permission** par défaut (RBAC est
+"deny by default") — il faut explicitement lier ce ServiceAccount à des
+droits via un `RoleBinding`.
 
-Remarque : aucun fichier ne définit de Namespace, et aucun ne met de
-champ `namespace:` — avec Helm, c'est `--namespace` (+
-`--create-namespace` pour le créer s'il n'existe pas) qui s'en occupe à
-l'installation, pour tout le chart d'un coup.
+## Les 4 objets RBAC
 
-## Explorer sans rien installer
+- **`ServiceAccount`** : l'identité du Pod (`chart/templates/serviceaccount.yaml`,
+  nommé `web`, référencé par `serviceAccountName: web` dans le
+  Deployment).
+- **`Role`** : une liste de permissions, **namespacée** — s'applique
+  uniquement dans le namespace où elle est créée.
+  (`chart/templates/rbac.yaml`, verbes `get`/`list`/`watch` sur les
+  `pods`.)
+- **`ClusterRole`** : la même chose, mais cluster-wide (ou pour des
+  ressources elles-mêmes non-namespacées, comme `Node` ou `Namespace`).
+  On n'en a pas besoin ici : notre appli n'a besoin de voir que les Pods
+  de son propre namespace. Un controller comme `ingress-nginx` (étape
+  10) ou un scraper Prometheus qui découvre des cibles dans tout le
+  cluster, eux, ont besoin d'un ClusterRole.
+- **`RoleBinding`** / **`ClusterRoleBinding`** : relie un Role/ClusterRole
+  à un ou plusieurs "subjects" (`ServiceAccount`, `User`, ou `Group`).
+  Sans binding, un Role ne s'applique à personne.
 
-```bash
-helm lint chart/
-helm template tuto chart/ --namespace tutorial-app
-```
+Règle simple : namespaced + namespaced (Role + RoleBinding) pour limiter
+la portée au namespace ; ClusterRole peut être réutilisé par plusieurs
+RoleBindings namespacés différents (pratique : un seul ClusterRole
+"pod-reader" réutilisable, lié namespace par namespace) ou par un
+ClusterRoleBinding pour une portée vraiment globale.
 
-`template` affiche le YAML final généré, exactement ce que `kubectl
-apply` recevrait — très utile pour vérifier ce qu'un changement de
-valeur va produire avant de l'appliquer pour de vrai.
-
-## Installer
-
-Un "Release" est une instance nommée d'un chart installée dans un
-cluster (tu peux installer le même chart plusieurs fois, sous des noms
-différents, par exemple pour plusieurs environnements).
-
-> Si tu as encore les ressources des étapes précédentes dans
-> `tutorial-app` (namespace, ConfigMap `db-config` nommée pareil,
-> etc.), supprime-les d'abord pour éviter les conflits de noms :
-> `kubectl delete all,configmap,secret,pvc,ingress -n tutorial-app --all`
-> (le namespace lui-même peut rester, Helm s'en sert directement).
+## Essayer
 
 ```bash
-helm install tuto chart/ --namespace tutorial-app --create-namespace
-kubectl get all -n tutorial-app
+helm upgrade tuto chart/ --namespace tutorial-app
+kubectl port-forward -n tutorial-app service/web 8080:80
+curl -s http://localhost:8080/ | grep "API Kubernetes"
 ```
 
-Lis les `NOTES` affichées à la fin : c'est `chart/templates/NOTES.txt`,
-lui aussi templatisé.
+Tu dois voir la liste des Pods `web-xxxxx`.
+
+Vérifie les objets créés :
 
 ```bash
-helm list -n tutorial-app
-helm status tuto -n tutorial-app
+kubectl get serviceaccount,role,rolebinding -n tutorial-app
+kubectl describe role web-pod-reader -n tutorial-app
 ```
 
-## Changer une valeur : `--set` ou un fichier de values
-
-Pour un essai ponctuel :
+Et la commande la plus utile pour déboguer RBAC — simuler "est-ce que ce
+ServiceAccount peut faire X" sans avoir à redéployer quoi que ce soit :
 
 ```bash
-helm upgrade tuto chart/ --namespace tutorial-app \
-  --set web.welcomeMessage="Bonjour depuis une mise à jour Helm !" \
-  --set web.replicaCount=5
-kubectl get pods -n tutorial-app -l app=web
+kubectl auth can-i list pods \
+  --as=system:serviceaccount:tutorial-app:web -n tutorial-app
 ```
 
-Observe : c'est un vrai `Deployment` qui reçoit ces changements, donc le
-même rolling update que vu à l'étape 3 se déclenche.
+## Casser puis réparer
 
-Pour un usage durable (staging vs prod, par exemple), on préfère un
-fichier de values dédié plutôt que des `--set` à rallonge :
+Le chart a un flag `rbac.create` justement pour ça :
 
 ```bash
-cat > /tmp/values-demo.yaml <<'EOF'
-web:
-  replicaCount: 2
-  welcomeMessage: "Valeurs depuis un fichier dédié"
-EOF
-
-helm upgrade tuto chart/ --namespace tutorial-app -f /tmp/values-demo.yaml
+helm upgrade tuto chart/ --namespace tutorial-app --set rbac.create=false
+kubectl get role,rolebinding -n tutorial-app   # plus rien
+curl -s http://localhost:8080/ | grep "API Kubernetes"
 ```
 
-(Dans un vrai projet, ce fichier s'appellerait `values-staging.yaml`,
-versionné à côté du chart, un par environnement.)
-
-## Historique et rollback
+Le ServiceAccount `web` existe toujours (le Deployment le référence
+toujours), mais sans Role ni RoleBinding, l'appel est refusé — tu
+devrais voir le message "refusé par RBAC (HTTP 403)" généré par
+`get_peer_info()`. Note que **l'appli ne crashe pas** : elle capture
+l'erreur et l'affiche, exactement comme on gérerait un service externe
+indisponible.
 
 ```bash
-helm history tuto -n tutorial-app
-helm rollback tuto 1 -n tutorial-app
+helm upgrade tuto chart/ --namespace tutorial-app --set rbac.create=true
 ```
 
-Chaque `install`/`upgrade` crée une révision numérotée ; `rollback`
-revient à une révision précédente — le pendant Helm du `kubectl rollout
-undo` vu à l'étape 3, mais au niveau de **tout le chart** d'un coup, pas
-juste d'un Deployment.
+(ou simplement ré-applique sans `--set`, `true` est la valeur par défaut
+dans `values.yaml`.)
 
-## Désinstaller
+## Le principe du moindre privilège
+
+Remarque ce qu'on **n'a pas** donné au Role : pas de `create`, pas de
+`delete`, pas de `update`, pas d'accès aux `secrets` ou aux
+`configmaps`, uniquement `get`/`list`/`watch` sur les `pods`. Une appli
+ne devrait jamais avoir plus de droits que ce dont elle a réellement
+besoin — un Pod compromis avec un ClusterRole `cluster-admin` serait une
+porte ouverte vers tout le cluster, alors qu'un Pod compromis avec notre
+Role n'expose au pire que la liste des noms de Pods du namespace.
+
+Si un Pod n'a besoin d'appeler l'API Kubernetes pour rien du tout
+(la plupart des cas), il vaut mieux désactiver complètement le montage
+du token plutôt que de laisser le ServiceAccount `default` traîner :
+
+```yaml
+automountServiceAccountToken: false
+```
+
+(dans `spec.template.spec`, à côté de `serviceAccountName`.)
+
+## Étape suivante
 
 ```bash
-helm uninstall tuto -n tutorial-app
+git checkout step-13-hpa
+cat STEP.md
 ```
 
-Supprime toutes les ressources créées par le Release. Note : les PVC du
-StatefulSet ne sont, comme vu à l'étape 9, pas forcément supprimés
-automatiquement selon la politique de rétention — vérifie avec
-`kubectl get pvc -n tutorial-app` après coup.
-
-## Secrets et Helm — l'angle mort à connaître
-
-`chart/values.yaml` contient `postgres.db.password` **en clair**. C'est
-pratique pour ce tuto, mais ça veut dire que si tu commites ce fichier
-dans un vrai projet, ton mot de passe de prod finit dans l'historique
-Git — exactement le problème qu'on avait pointé à l'étape 7 à propos des
-Secrets Kubernetes (le Secret, lui, protège l'accès dans le cluster ;
-ça ne protège rien si la valeur est aussi écrite en clair dans ton repo
-de charts). En pratique, les options courantes sont :
-
-- ne jamais committer le fichier de values contenant les secrets, et le
-  fournir à `helm install -f` depuis un endroit sécurisé (CI/CD avec
-  secrets protégés, gestionnaire de secrets de l'organisation...),
-- le plugin **`helm-secrets`** (chiffre un fichier de values entier avec
-  SOPS/age/GPG, et le déchiffre à la volée au moment du `helm` command),
-- un opérateur comme **External Secrets Operator** qui injecte les
-  Secrets Kubernetes directement depuis Vault/AWS Secrets Manager/etc.,
-  sans jamais les faire transiter par un fichier de values.
-
-## Pour aller plus loin
-
-- **Sub-charts/dépendances** (`Chart.yaml` → `dependencies:`) : composer
-  plusieurs charts ensemble (ex: ton appli + le chart officiel
-  `bitnami/postgresql` au lieu d'écrire le StatefulSet à la main).
-- **Hooks** (`helm.sh/hook: pre-install`, `post-upgrade`...) : exécuter
-  un Job avant/après une opération (ex: migration de base de données).
-- **`helm package`** + un dépôt de charts (ChartMuseum, OCI registry...)
-  pour distribuer un chart versionné à d'autres équipes.
-
----
-
-Fin du tutoriel. Depuis une simple image Docker, on est passé par
-Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
-Secret → PersistentVolume → StatefulSet → Ingress → Helm — les briques
-de base qu'on retrouve dans la quasi-totalité des applications tournant
-sur Kubernetes en production.
+On vient d'ajouter un appel réseau par requête (vers l'API Kubernetes)
+en plus de la base — bon prétexte pour parler de scaling automatique :
+le **HorizontalPodAutoscaler**.
