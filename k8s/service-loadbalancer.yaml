@@ -1,0 +1,18 @@
+# Variante LoadBalancer : en environnement cloud (AWS/GCP/Azure...), ce type
+# provisionne automatiquement un load balancer externe avec une IP publique.
+# minikube n'a pas de cloud derrière lui, mais simule le comportement via
+# "minikube tunnel" (à lancer dans un terminal séparé, laissé ouvert) :
+#   kubectl apply -f k8s/service-loadbalancer.yaml
+#   minikube tunnel
+#   kubectl get service web-loadbalancer   # une EXTERNAL-IP apparaît
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-loadbalancer
+spec:
+  type: LoadBalancer
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 80

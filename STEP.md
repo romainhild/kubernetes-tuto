@@ -1,85 +1,99 @@
-# Étape 3 — Le Deployment
+# Étape 4 — Le Service
 
-Un **Deployment** ne gère pas directement des Pods : il gère des
-**ReplicaSets**, et sait faire la transition entre deux versions d'un
-ReplicaSet sans coupure de service. C'est la ressource que tu utiliseras
-le plus souvent au quotidien pour des applications sans état (stateless).
+Jusqu'ici on accédait à l'appli via `kubectl port-forward`, pratique pour
+débugger mais pas pour un usage réel : ça ouvre un tunnel depuis TON
+poste vers UN Pod précis, qui disparaît si ce Pod est recréé.
 
-## Nouveau fichier
+Un **Service** résout deux problèmes à la fois :
+1. **Découverte** : donner un nom stable (DNS interne) à un ensemble de
+   Pods qui changent tout le temps (recréés, scalés, mis à jour...).
+2. **Répartition de charge** : le trafic envoyé au Service est réparti
+   entre tous les Pods qui matchent son `selector` et sont "Ready"
+   (souviens-toi des `readinessProbe` de l'étape précédente — c'est
+   exactement là qu'elles servent).
 
-- `k8s/deployment.yaml` — remplace `k8s/replicaset.yaml`. Même template
-  de Pod, mais avec une stratégie de mise à jour explicite, plus deux
-  "probes" (voir plus bas).
+Le lien Service → Pods se fait, comme pour le ReplicaSet, uniquement par
+labels (`selector: app: web`), jamais par nom de Pod.
 
-## Essayer
+## Les fichiers de cette étape
 
-```bash
-kubectl apply -f k8s/deployment.yaml
-kubectl get deployments,replicasets,pods
-```
+- `k8s/service-clusterip.yaml` — **celui qu'on applique par défaut**.
+- `k8s/service-nodeport.yaml`, `k8s/service-loadbalancer.yaml`,
+  `k8s/service-headless.yaml`, `k8s/service-externalname.yaml` — les
+  autres types, à essayer en option (expliqués ci-dessous), en plus du
+  ClusterIP (noms différents, donc pas de conflit).
 
-Remarque : le Deployment a créé un ReplicaSet (nommé `web-<hash>`) qui a
-lui-même créé les 3 Pods. Trois niveaux : Deployment → ReplicaSet → Pod.
+## Les types de Service
 
-## Démonstration : une mise à jour sans coupure
+### `ClusterIP` (par défaut)
 
-Modifie `app/index.html` (par exemple change le texte), reconstruis
-l'image avec un **nouveau tag** :
-
-```bash
-minikube image build -t local/k8s-tutorial-web:v2 app/
-```
-
-Édite `k8s/deployment.yaml` pour utiliser `local/k8s-tutorial-web:v2`,
-puis :
-
-```bash
-kubectl apply -f k8s/deployment.yaml
-kubectl rollout status deployment/web
-kubectl get replicasets
-```
-
-Tu vas voir un **nouveau** ReplicaSet monter en puissance pendant que
-l'ancien redescend — jamais plus de `replicas + maxSurge` Pods au total,
-jamais moins de `replicas - maxUnavailable` Pods disponibles. C'est
-réglé ici en `maxSurge: 1` / `maxUnavailable: 0` : zéro interruption,
-au prix d'un Pod temporairement en plus.
-
-## Les stratégies de mise à jour
-
-- **`RollingUpdate`** (par défaut) : remplace les Pods progressivement.
-  - `maxSurge` : combien de Pods en plus du compte demandé peuvent
-    exister pendant la transition (en nombre ou en %).
-  - `maxUnavailable` : combien de Pods peuvent être indisponibles pendant
-    la transition.
-- **`Recreate`** : détruit tous les anciens Pods avant de créer les
-  nouveaux. Coupure de service garantie, mais utile quand deux versions
-  ne peuvent pas cohabiter (ex: migration de schéma de base incompatible).
-
-## Revenir en arrière
+Une IP virtuelle, stable, **routable uniquement depuis l'intérieur du
+cluster**. C'est le bon choix pour la communication entre services
+internes (ex: une appli qui parle à sa base de données — on l'utilisera
+à l'étape 8).
 
 ```bash
-kubectl rollout history deployment/web
-kubectl rollout undo deployment/web
+kubectl apply -f k8s/service-clusterip.yaml
+kubectl get service web
+kubectl run curler --rm -it --image=busybox --restart=Never -- wget -qO- http://web
 ```
 
-## Les probes (pourquoi elles comptent ici)
+Et toujours accessible depuis ton poste via port-forward, mais cette
+fois sur le Service plutôt que sur un Pod précis (le Service survit à
+la recréation des Pods, pas le port-forward sur un Pod) :
 
-- **`readinessProbe`** : tant qu'elle échoue, le Pod n'est pas considéré
-  "prêt" — il ne reçoit pas de trafic (via un Service, étape suivante) et
-  n'est pas compté dans le calcul du rolling update. C'est ce qui permet
-  au Deployment de savoir qu'un nouveau Pod est vraiment prêt avant de
-  couper l'ancien.
-- **`livenessProbe`** : si elle échoue de façon répétée, Kubernetes tue
-  et redémarre le conteneur. Utile si l'appli peut se retrouver "bloquée"
-  sans crasher.
+```bash
+kubectl port-forward service/web 8080:80
+```
+
+### `NodePort`
+
+En plus d'un ClusterIP, ouvre le **même port sur chaque nœud** du
+cluster (ici `30080`, dans la plage autorisée 30000-32767). N'importe
+qui qui peut atteindre un nœud peut atteindre le Service.
+
+```bash
+kubectl apply -f k8s/service-nodeport.yaml
+minikube service web-nodeport --url
+```
+
+### `LoadBalancer`
+
+Dans un vrai cloud (AWS/GCP/Azure/OVH...), ce type déclenche la création
+automatique d'un load balancer externe avec une IP publique — c'est le
+mécanisme derrière "exposer une appli sur Internet" en prod. En local,
+minikube simule ça avec `minikube tunnel` :
+
+```bash
+kubectl apply -f k8s/service-loadbalancer.yaml
+minikube tunnel   # terminal à part, à laisser ouvert
+kubectl get service web-loadbalancer   # observe l'EXTERNAL-IP apparaître
+```
+
+### `ClusterIP: None` (Service headless)
+
+Pas d'IP virtuelle : une requête DNS sur le nom du Service renvoie
+directement les IP de tous les Pods. Utile quand le client doit gérer
+lui-même la connexion à un Pod précis (bases de données répliquées,
+certains protocoles). On en reparlera avec les StatefulSets à l'étape 8.
+
+### `ExternalName`
+
+Pas de Pods, pas de selector : un simple alias DNS interne vers un nom
+externe. Sert à appeler une dépendance externe par un nom "interne"
+stable, pratique si l'adresse réelle change plus tard.
+
+## Nettoyage avant de passer à l'étape suivante
+
+```bash
+kubectl delete service web-nodeport web-loadbalancer web-headless 2>/dev/null
+```
+
+(On garde le Deployment et le Service `web` en ClusterIP pour la suite.)
 
 ## Étape suivante
 
 ```bash
-git checkout step-4-service
+git checkout step-5-namespace
 cat STEP.md
 ```
-
-Pour l'instant on accède toujours à l'appli via `kubectl port-forward`.
-On va enfin exposer ça proprement avec un **Service**.

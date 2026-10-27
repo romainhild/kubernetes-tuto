@@ -1,0 +1,13 @@
+# Le type par défaut : accessible uniquement depuis l'intérieur du cluster.
+# C'est celui qu'on applique dans cette étape.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  type: ClusterIP
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 80
