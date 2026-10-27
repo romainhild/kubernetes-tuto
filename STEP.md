@@ -1,153 +1,175 @@
-# Étape 10 — L'Ingress
+# Étape 11 — Helm
 
-Jusqu'ici, pour atteindre l'appli depuis ton navigateur, il fallait soit
-`kubectl port-forward` (un tunnel qui ne survit pas à la fermeture du
-terminal), soit un Service `NodePort`/`LoadBalancer` (un port par
-service, pas de nom de domaine, pas de routage par chemin). Un
-**Ingress** résout le problème de "comment exposer plusieurs
-applications HTTP(S) proprement, avec de vrais noms d'hôte et des
-chemins, derrière une seule entrée" — exactement ce qu'un reverse proxy
-fait devant un parc de services.
+On a maintenant une dizaine de fichiers YAML à appliquer dans le bon
+ordre, avec des valeurs répétées à la main entre les étapes (le nom du
+namespace, le tag d'image, le message d'accueil...). **Helm** est le
+gestionnaire de paquets de l'écosystème Kubernetes : il transforme ces
+manifestes en un **chart** templatisé, paramétrable par un seul fichier
+de valeurs, installable/désinstallable/mettable à jour comme un paquet.
 
-## Point essentiel à comprendre tout de suite
+Pré-requis : `brew install helm`.
 
-**Une ressource `Ingress` seule ne fait rien.** Contrairement à un
-Service (que `kube-proxy` implémente nativement sur chaque nœud),
-l'Ingress n'est qu'un ensemble de règles ("si host=X et path=Y, envoie
-vers ce Service"). Il faut un **Ingress Controller** — un vrai
-reverse proxy qui tourne dans le cluster (sous forme de Pods, comme
-n'importe quelle appli) et qui surveille les objets Ingress pour
-configurer son routage. Sans controller, créer un Ingress ne change
-absolument rien. Les plus courants : ingress-nginx, Traefik, HAProxy,
-ou des versions managées par les clouds (ALB sur AWS, GCE sur GCP...).
+## Ce qui change
 
-## Activer un Ingress Controller sur minikube
+On arrête d'utiliser `k8s/*.yaml` à partir de cette étape : tout est
+remplacé par `chart/`, qui contient la même appli (ConfigMap, Secret,
+StatefulSet Postgres, Service headless, Deployment, Service, Ingress)
+sous forme de templates. Rien n'est perdu : chaque étape précédente
+reste consultable sur sa branche avec ses manifestes bruts — c'est tout
+l'intérêt d'avoir fait ce tuto avec une branche par étape.
 
-```bash
-minikube addons enable ingress
-kubectl get pods -n ingress-nginx
+## Anatomie du chart
+
+```
+chart/
+├── Chart.yaml        # métadonnées : nom, version du chart, version de l'appli
+├── values.yaml        # les valeurs par défaut, le seul fichier que tu modifies en usage normal
+├── .helmignore         # fichiers à ignorer lors du packaging (comme un .gitignore)
+└── templates/
+    ├── configmap.yaml
+    ├── secret.yaml
+    ├── postgres-service.yaml
+    ├── postgres-statefulset.yaml
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── ingress.yaml
+    └── NOTES.txt      # affiché après install/upgrade, généré avec les valeurs utilisées
 ```
 
-Ça déploie `ingress-nginx` (basé sur nginx) dans son propre namespace.
-Attends que le Pod du controller soit `Running`.
+Chaque fichier sous `templates/` est un manifeste Kubernetes presque
+normal, où certaines valeurs sont remplacées par des expressions
+`{{ .Values.xxx }}` — regarde `chart/templates/deployment.yaml` : au
+lieu de `image: local/k8s-tutorial-counter:dev` en dur, on a
+`image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"`,
+dont les valeurs viennent de `chart/values.yaml`.
 
-## Nouveaux fichiers
+Remarque : aucun fichier ne définit de Namespace, et aucun ne met de
+champ `namespace:` — avec Helm, c'est `--namespace` (+
+`--create-namespace` pour le créer s'il n'existe pas) qui s'en occupe à
+l'installation, pour tout le chart d'un coup.
 
-- `k8s/ingress.yaml` — route `http://tuto.local/` vers le Service `web`.
-- `k8s/ingress-tls.yaml` — la même chose, en HTTPS (section plus bas).
-
-## Essayer
-
-```bash
-kubectl apply -f k8s/ingress.yaml
-kubectl get ingress -n tutorial-app
-```
-
-La colonne `CLASS` doit afficher `nginx`, et `ADDRESS` finira par se
-remplir avec l'IP du controller.
-
-### Accéder à l'appli via un vrai nom d'hôte
-
-Deux choses à faire : dire à ton Mac que `tuto.local` doit pointer vers
-le controller, puis rendre le controller joignable depuis ton poste.
-
-**1. Résoudre `tuto.local` vers ta machine** (nécessite `sudo`, une
-seule fois) :
+## Explorer sans rien installer
 
 ```bash
-echo "127.0.0.1 tuto.local" | sudo tee -a /etc/hosts
+helm lint chart/
+helm template tuto chart/ --namespace tutorial-app
 ```
 
-**2. Exposer le controller sur ton poste** — avec le driver Docker de
-minikube sur Mac, l'IP du nœud n'est pas directement joignable depuis
-le Mac, donc on fait un port-forward vers le Service du controller
-(le même mécanisme que pour nos propres apps aux étapes précédentes,
-appliqué cette fois au reverse proxy plutôt qu'à `web` directement) :
+`template` affiche le YAML final généré, exactement ce que `kubectl
+apply` recevrait — très utile pour vérifier ce qu'un changement de
+valeur va produire avant de l'appliquer pour de vrai.
+
+## Installer
+
+Un "Release" est une instance nommée d'un chart installée dans un
+cluster (tu peux installer le même chart plusieurs fois, sous des noms
+différents, par exemple pour plusieurs environnements).
+
+> Si tu as encore les ressources des étapes précédentes dans
+> `tutorial-app` (namespace, ConfigMap `db-config` nommée pareil,
+> etc.), supprime-les d'abord pour éviter les conflits de noms :
+> `kubectl delete all,configmap,secret,pvc,ingress -n tutorial-app --all`
+> (le namespace lui-même peut rester, Helm s'en sert directement).
 
 ```bash
-kubectl port-forward -n ingress-nginx service/ingress-nginx-controller 8080:80 8443:443
+helm install tuto chart/ --namespace tutorial-app --create-namespace
+kubectl get all -n tutorial-app
 ```
 
-Puis dans un navigateur ou avec curl :
+Lis les `NOTES` affichées à la fin : c'est `chart/templates/NOTES.txt`,
+lui aussi templatisé.
 
 ```bash
-curl http://tuto.local:8080/
+helm list -n tutorial-app
+helm status tuto -n tutorial-app
 ```
 
-Tu dois voir la page de l'appli — en passant cette fois par
-`tuto.local` → ingress-nginx → Service `web` → un des Pods, et plus par
-un port-forward direct sur l'appli.
+## Changer une valeur : `--set` ou un fichier de values
 
-(Alternative, plus proche d'un vrai port 80/443 : `minikube tunnel`
-dans un terminal séparé — laissé ouvert, demande aussi `sudo` — puis
-`http://tuto.local` sans port. Le port-forward ci-dessus évite ce
-`sudo` supplémentaire et marche de façon identique pour apprendre.)
-
-## HTTPS avec un certificat auto-signé
-
-On génère un certificat auto-signé (ne jamais faire ça pour un vrai
-site public — un navigateur affichera un avertissement, normal) :
+Pour un essai ponctuel :
 
 ```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /tmp/tuto.key -out /tmp/tuto.crt -subj "/CN=tuto.local"
-
-kubectl create secret tls tuto-tls \
-  --cert=/tmp/tuto.crt --key=/tmp/tuto.key \
-  -n tutorial-app
+helm upgrade tuto chart/ --namespace tutorial-app \
+  --set web.welcomeMessage="Bonjour depuis une mise à jour Helm !" \
+  --set web.replicaCount=5
+kubectl get pods -n tutorial-app -l app=web
 ```
 
-Tu reconnais `kubectl create secret tls` : c'est le type
-`kubernetes.io/tls` vu à l'étape 7, avec ses clés obligatoires
-`tls.crt`/`tls.key`.
+Observe : c'est un vrai `Deployment` qui reçoit ces changements, donc le
+même rolling update que vu à l'étape 3 se déclenche.
+
+Pour un usage durable (staging vs prod, par exemple), on préfère un
+fichier de values dédié plutôt que des `--set` à rallonge :
 
 ```bash
-kubectl apply -f k8s/ingress-tls.yaml
-curl -k https://tuto.local:8443/
+cat > /tmp/values-demo.yaml <<'EOF'
+web:
+  replicaCount: 2
+  welcomeMessage: "Valeurs depuis un fichier dédié"
+EOF
+
+helm upgrade tuto chart/ --namespace tutorial-app -f /tmp/values-demo.yaml
 ```
 
-Le `-k` dit à curl d'ignorer l'avertissement de certificat auto-signé
-(un vrai site utiliserait un certificat signé par une autorité reconnue,
-ex: via cert-manager + Let's Encrypt — hors du cadre de ce tuto).
+(Dans un vrai projet, ce fichier s'appellerait `values-staging.yaml`,
+versionné à côté du chart, un par environnement.)
 
-## Les options de routage
-
-- **`pathType`** :
-  - `Prefix` (notre cas) : `/` matche tout.
-  - `Exact` : doit correspondre caractère pour caractère.
-  - `ImplementationSpecific` : laissé à l'interprétation du controller.
-- **Plusieurs chemins vers des services différents** (fan-out), pour
-  exposer plusieurs applications sous le même host :
-  ```yaml
-  rules:
-    - host: tuto.local
-      http:
-        paths:
-          - path: /api
-            pathType: Prefix
-            backend: { service: { name: api, port: { number: 80 } } }
-          - path: /
-            pathType: Prefix
-            backend: { service: { name: web, port: { number: 80 } } }
-  ```
-- **Plusieurs hosts** dans le même Ingress, chacun avec ses propres
-  règles — pratique pour héberger plusieurs sites derrière un seul
-  controller/une seule IP publique.
-- **`ingressClassName`** : un cluster peut avoir plusieurs controllers
-  installés (`kubectl get ingressclass` les liste) ; ce champ dit lequel
-  doit traiter cet Ingress.
-- Beaucoup de comportements fins (rewrite d'URL, limitation de débit,
-  authentification basique...) passent par des **annotations**
-  spécifiques au controller (ex:
-  `nginx.ingress.kubernetes.io/rewrite-target`) plutôt que par le champ
-  `spec` standard, qui reste volontairement minimal.
-
-## Étape suivante
+## Historique et rollback
 
 ```bash
-git checkout step-11-helm
-cat STEP.md
+helm history tuto -n tutorial-app
+helm rollback tuto 1 -n tutorial-app
 ```
 
-On a maintenant pas mal de fichiers YAML à gérer à la main. Dernière
-étape : les empaqueter dans un **chart Helm**.
+Chaque `install`/`upgrade` crée une révision numérotée ; `rollback`
+revient à une révision précédente — le pendant Helm du `kubectl rollout
+undo` vu à l'étape 3, mais au niveau de **tout le chart** d'un coup, pas
+juste d'un Deployment.
+
+## Désinstaller
+
+```bash
+helm uninstall tuto -n tutorial-app
+```
+
+Supprime toutes les ressources créées par le Release. Note : les PVC du
+StatefulSet ne sont, comme vu à l'étape 9, pas forcément supprimés
+automatiquement selon la politique de rétention — vérifie avec
+`kubectl get pvc -n tutorial-app` après coup.
+
+## Secrets et Helm — l'angle mort à connaître
+
+`chart/values.yaml` contient `postgres.db.password` **en clair**. C'est
+pratique pour ce tuto, mais ça veut dire que si tu commites ce fichier
+dans un vrai projet, ton mot de passe de prod finit dans l'historique
+Git — exactement le problème qu'on avait pointé à l'étape 7 à propos des
+Secrets Kubernetes (le Secret, lui, protège l'accès dans le cluster ;
+ça ne protège rien si la valeur est aussi écrite en clair dans ton repo
+de charts). En pratique, les options courantes sont :
+
+- ne jamais committer le fichier de values contenant les secrets, et le
+  fournir à `helm install -f` depuis un endroit sécurisé (CI/CD avec
+  secrets protégés, gestionnaire de secrets de l'organisation...),
+- le plugin **`helm-secrets`** (chiffre un fichier de values entier avec
+  SOPS/age/GPG, et le déchiffre à la volée au moment du `helm` command),
+- un opérateur comme **External Secrets Operator** qui injecte les
+  Secrets Kubernetes directement depuis Vault/AWS Secrets Manager/etc.,
+  sans jamais les faire transiter par un fichier de values.
+
+## Pour aller plus loin
+
+- **Sub-charts/dépendances** (`Chart.yaml` → `dependencies:`) : composer
+  plusieurs charts ensemble (ex: ton appli + le chart officiel
+  `bitnami/postgresql` au lieu d'écrire le StatefulSet à la main).
+- **Hooks** (`helm.sh/hook: pre-install`, `post-upgrade`...) : exécuter
+  un Job avant/après une opération (ex: migration de base de données).
+- **`helm package`** + un dépôt de charts (ChartMuseum, OCI registry...)
+  pour distribuer un chart versionné à d'autres équipes.
+
+---
+
+Fin du tutoriel. Depuis une simple image Docker, on est passé par
+Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
+Secret → PersistentVolume → StatefulSet → Ingress → Helm — les briques
+de base qu'on retrouve dans la quasi-totalité des applications tournant
+sur Kubernetes en production.

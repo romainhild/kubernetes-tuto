@@ -2,11 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web
-  namespace: tutorial-app
   labels:
     app: web
 spec:
-  replicas: 3
+  replicas: {{ .Values.web.replicaCount }}
   selector:
     matchLabels:
       app: web
@@ -22,8 +21,8 @@ spec:
     spec:
       containers:
         - name: web
-          image: local/k8s-tutorial-counter:dev
-          imagePullPolicy: Never
+          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
           ports:
             - containerPort: 80
           env:

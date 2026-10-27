@@ -1,0 +1,28 @@
+web:
+  replicaCount: 3
+  image:
+    repository: local/k8s-tutorial-counter
+    tag: dev
+    pullPolicy: Never
+  welcomeMessage: "Bonjour depuis Helm !"
+
+postgres:
+  replicaCount: 1
+  image:
+    repository: postgres
+    tag: "16-alpine"
+  storage: 1Gi
+  db:
+    name: tutorial
+    user: tutorial_user
+    # À ne JAMAIS committer en vrai : cf STEP.md (section "Secrets et Helm").
+    password: demo-db-password-change-me
+  apiToken: demo-secret-token-12345
+
+ingress:
+  enabled: true
+  className: nginx
+  host: tuto.local
+  tls:
+    enabled: false
+    secretName: tuto-tls

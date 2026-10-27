@@ -2,12 +2,11 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres
-  namespace: tutorial-app
   labels:
     app: postgres
 spec:
   serviceName: postgres
-  replicas: 2
+  replicas: {{ .Values.postgres.replicaCount }}
   selector:
     matchLabels:
       app: postgres
@@ -18,7 +17,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
           ports:
             - containerPort: 5432
           env:
@@ -60,4 +59,4 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 1Gi
+            storage: {{ .Values.postgres.storage | quote }}

@@ -1,0 +1,16 @@
+Le chart "{{ .Chart.Name }}" ({{ .Chart.AppVersion }}) est installé sous le nom de release "{{ .Release.Name }}", dans le namespace "{{ .Release.Namespace }}".
+
+Vérifier que tout tourne :
+  kubectl get all -n {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+
+Accès via Ingress (après "minikube addons enable ingress" et un port-forward sur le controller) :
+  echo "127.0.0.1 {{ .Values.ingress.host }}" | sudo tee -a /etc/hosts
+  kubectl port-forward -n ingress-nginx service/ingress-nginx-controller 8080:80
+  curl http://{{ .Values.ingress.host }}:8080/
+{{- else }}
+
+Ingress désactivé (ingress.enabled=false) — accès via port-forward direct :
+  kubectl port-forward -n {{ .Release.Namespace }} service/web 8080:80
+{{- end }}

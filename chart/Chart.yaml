@@ -1,0 +1,6 @@
+apiVersion: v2
+name: k8s-tutorial
+description: Appli du tutoriel Kubernetes (compteur de visites + Postgres) packagée en chart Helm
+type: application
+version: 0.1.0
+appVersion: "1.0"
