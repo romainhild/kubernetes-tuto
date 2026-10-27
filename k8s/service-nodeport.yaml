@@ -7,6 +7,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: web-nodeport
+  namespace: tutorial-app
 spec:
   type: NodePort
   selector:
