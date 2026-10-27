@@ -75,16 +75,37 @@ kubectl edit configmap web-content -n tutorial-app
 # change le texte de index.html, sauvegarde
 ```
 
-Le fichier monté en volume se met à jour **tout seul** après quelques
-secondes à quelques minutes (le kubelet resynchronise périodiquement),
-sans redémarrer le Pod — rafraîchis la page. En revanche, la variable
-d'environnement, elle, **ne changera pas** dans les Pods déjà démarrés :
-les variables d'env sont figées au démarrage du conteneur. Il faut un
-nouveau rollout (`kubectl rollout restart deployment/web -n
-tutorial-app`) pour qu'elle soit reprise.
+En général, un fichier monté en volume depuis une ConfigMap se met à
+jour **tout seul** après quelques secondes à quelques minutes (le
+kubelet resynchronise périodiquement), sans redémarrer le Pod.
 
-C'est une distinction importante à retenir : *volume monté* = mise à
-jour "live" ; *variable d'environnement* = fige au démarrage.
+⚠️ **Mais pas ici.** Dès qu'on utilise `subPath` (notre cas, pour ne
+monter que la clé `index.html` sans écraser tout le dossier), ce
+mécanisme de mise à jour automatique est **désactivé** — c'est une
+limitation documentée de Kubernetes, pas une question de délai : un
+fichier monté via `subPath` ne reçoit jamais les mises à jour de la
+ConfigMap tant que le Pod n'est pas recréé. Rafraîchir la page ne
+suffira donc pas, même en attendant.
+
+Pour voir le changement, il faut forcer un nouveau rollout :
+
+```bash
+kubectl rollout restart deployment/web -n tutorial-app
+kubectl rollout status deployment/web -n tutorial-app
+```
+
+La variable d'environnement `WELCOME_MESSAGE`, elle, ne se mettra pas
+à jour non plus dans les Pods déjà démarrés — les variables d'env sont
+de toute façon toujours figées au démarrage du conteneur, `subPath` ou
+pas. Le même `rollout restart` ci-dessus la reprendra aussi.
+
+**À retenir :** un volume de ConfigMap *sans* `subPath` se mettrait à
+jour en live ; dès que tu ajoutes un `subPath` (souvent nécessaire pour
+ne monter qu'un seul fichier sans écraser tout un dossier), tu perds
+cette mise à jour automatique et tu dois forcer un rollout. C'est un
+vrai piège rencontré fréquemment en pratique (par exemple pour monter
+un seul fichier de config dans un dossier qui contient aussi des
+binaires de l'image).
 
 ## Autres détails utiles
 
