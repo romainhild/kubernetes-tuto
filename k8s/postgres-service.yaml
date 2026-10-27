@@ -1,10 +1,14 @@
+# Service "gouvernant" du StatefulSet : clusterIP: None (headless), c'est
+# ce que référence "serviceName" dans le StatefulSet. Il ne fait plus de
+# répartition de charge : il donne surtout à chaque Pod un nom DNS stable
+# (ex: postgres-0.postgres.tutorial-app.svc.cluster.local).
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres
   namespace: tutorial-app
 spec:
-  type: ClusterIP
+  clusterIP: None
   selector:
     app: postgres
   ports:

@@ -1,175 +1,129 @@
-# Étape 8 — PersistentVolume, PersistentVolumeClaim, et une vraie base de données
+# Étape 9 — Le StatefulSet
 
-Dernière couche : on remplace la page statique par une petite appli
-Python (Flask) qui compte ses visites dans une base **Postgres**, et on
-apprend comment Kubernetes gère le stockage qui doit **survivre** à la
-suppression d'un Pod — ce qu'aucune des ressources vues jusqu'ici ne
-permettait (un Pod recréé repart toujours de zéro).
+À l'étape 8, Postgres tournait dans un Deployment classique, volontairement
+limité à 1 réplique, avec une stratégie `Recreate` pour contourner le
+problème du volume `ReadWriteOnce` partagé. Un **StatefulSet** est fait
+spécifiquement pour ce genre de charge : il donne à chaque Pod une
+**identité stable** et **son propre volume**, et gère les mises à jour
+dans l'ordre sans le hack `Recreate`.
 
-## Vue d'ensemble de ce qui change
+## Ce qui change
 
-- Nouvelle appli : `app/counter/` (Flask + psycopg2), qui remplace
-  `nginx` dans le Deployment `web`.
-- `k8s/db-config.yaml` et `k8s/db-secret.yaml` remplacent
-  `web-content`/`web-secret` : mêmes idées que les étapes 6 et 7, mais
-  leurs clés sont maintenant **partagées entre deux Deployments**
-  différents (l'appli et Postgres).
-- `k8s/postgres-pvc.yaml`, `k8s/postgres-deployment.yaml`,
-  `k8s/postgres-service.yaml` : la base de données elle-même.
-- `k8s/deployment.yaml` : le Deployment `web` utilise maintenant l'image
-  du compteur et se connecte à Postgres.
+- `k8s/postgres-deployment.yaml` et `k8s/postgres-pvc.yaml` disparaissent,
+  remplacés par `k8s/postgres-statefulset.yaml`.
+- `k8s/postgres-service.yaml` devient **headless** (`clusterIP: None`) :
+  c'est le Service "gouvernant" référencé par `serviceName` dans le
+  StatefulSet.
+- `k8s/db-config.yaml` : `DB_HOST` passe de `postgres` à
+  `postgres-0.postgres` — explication plus bas, c'est le cœur de la leçon.
 
-## PersistentVolume, PersistentVolumeClaim, StorageClass : qui fait quoi
+## Les trois garanties d'un StatefulSet
 
-Trois objets différents, souvent confondus :
+1. **Noms stables et ordonnés** : les Pods s'appellent `postgres-0`,
+   `postgres-1`, ... (pas de suffixe aléatoire comme un Deployment), créés
+   dans l'ordre (`0` doit être `Ready` avant que `1` démarre), et détruits
+   dans l'ordre inverse en cas de scale-down.
+2. **Un volume dédié par Pod, qui le suit** : `volumeClaimTemplates`
+   génère un PVC par réplique, nommé `<template>-<statefulset>-<n>`. Si
+   `postgres-1` est supprimé puis recréé, il **retrouve son propre PVC**
+   (pas un volume neuf, et pas celui de `postgres-0`).
+3. **DNS stable par Pod** : grâce au Service headless `postgres`, chaque
+   Pod est joignable individuellement via
+   `<pod>.<service>.<namespace>.svc.cluster.local`, ex:
+   `postgres-0.postgres.tutorial-app.svc.cluster.local` (raccourci en
+   `postgres-0.postgres` depuis le même namespace).
 
-- **`PersistentVolume` (PV)** : un morceau de stockage réel (un disque,
-  un export NFS, un hostPath...), une ressource *cluster-wide* (pas dans
-  un namespace). Quelqu'un (un admin, ou un provisioner automatique) doit
-  le créer.
-- **`PersistentVolumeClaim` (PVC)** : une **demande** de stockage faite
-  par un utilisateur/une appli ("je veux 1Gi, en ReadWriteOnce"). C'est
-  namespacé, et c'est ce qu'on référence depuis un Pod.
-- **`StorageClass`** : un "profil" qui dit *comment* provisionner un PV
-  automatiquement quand un PVC le demande (quel type de disque, quel
-  driver...). C'est le **provisioning dynamique** : plus besoin de créer
-  les PV à la main, le cluster le fait dès qu'un PVC apparaît.
-
-Dans ce tuto on ne crée aucun PV ni StorageClass : minikube a déjà une
-StorageClass par défaut (`standard`, basée sur `hostPath`) qui
-provisionne automatiquement un PV dès que `k8s/postgres-pvc.yaml` est
-appliqué. C'est le cas le plus courant en pratique.
+## Essayer
 
 ```bash
-kubectl apply -f k8s/postgres-pvc.yaml
+kubectl apply -f k8s/postgres-service.yaml -f k8s/postgres-statefulset.yaml
+kubectl get pods -n tutorial-app -l app=postgres -w
+```
+
+Observe `postgres-0` passer `Running`/`Ready` avant que `postgres-1`
+démarre seulement ensuite — un ReplicaSet aurait lancé les deux en
+parallèle.
+
+```bash
 kubectl get pvc -n tutorial-app
-kubectl get pv
 ```
 
-Tu verras le PVC passer en `Bound`, lié à un PV créé automatiquement.
+Deux PVC distincts : `postgres-data-postgres-0` et
+`postgres-data-postgres-1`.
 
-## Les Access Modes
-
-- **`ReadWriteOnce` (RWO)** : monté en lecture/écriture par **un seul
-  nœud** à la fois (pas "un seul Pod" strictement — plusieurs Pods sur
-  le même nœud peuvent le partager, mais c'est rare en pratique). C'est
-  le mode qu'on utilise ici pour Postgres, et le plus répandu
-  (disques cloud classiques : EBS, Persistent Disk...).
-- **`ReadOnlyMany` (ROX)** : plusieurs nœuds en lecture seule.
-- **`ReadWriteMany` (RWX)** : plusieurs nœuds en lecture/écriture —
-  demande un backend qui le supporte vraiment (NFS, EFS, Filestore...),
-  pas les disques blocs classiques.
-
-## Pourquoi `strategy: Recreate` sur le Deployment Postgres
-
-Regarde `k8s/postgres-deployment.yaml` : contrairement au Deployment
-`web`, sa stratégie est `Recreate`, pas `RollingUpdate`. Avec un volume
-`ReadWriteOnce`, un rolling update voudrait démarrer le nouveau Pod
-*avant* de couper l'ancien — mais le nouveau Pod resterait bloqué en
-`Pending`, incapable de monter un volume déjà attaché à l'ancien Pod.
-`Recreate` supprime l'ancien avant de créer le nouveau : une courte
-coupure, mais pas de blocage.
-
-(Note au passage : `PGDATA` est réglé sur un sous-dossier
-`/var/lib/postgresql/data/pgdata` plutôt que la racine du volume monté —
-certains backends de volume y créent un dossier `lost+found` que
-Postgres refuse de voir à la racine de son data dir.)
-
-## Construire et déployer
+## Le piège à bien comprendre : scaler ≠ répliquer les données
 
 ```bash
-minikube image build -t local/k8s-tutorial-counter:dev app/counter/
+kubectl exec -n tutorial-app postgres-0 -- psql -U tutorial_user -d tutorial -c \
+  "CREATE TABLE IF NOT EXISTS visits (id SERIAL PRIMARY KEY); INSERT INTO visits DEFAULT VALUES; SELECT count(*) FROM visits;"
 
-kubectl apply -f k8s/db-config.yaml -f k8s/db-secret.yaml
-kubectl apply -f k8s/postgres-pvc.yaml -f k8s/postgres-deployment.yaml -f k8s/postgres-service.yaml
-kubectl rollout status deployment/postgres -n tutorial-app
-
-kubectl apply -f k8s/deployment.yaml -f k8s/service-clusterip.yaml
-kubectl rollout status deployment/web -n tutorial-app
+kubectl exec -n tutorial-app postgres-1 -- psql -U tutorial_user -d tutorial -c \
+  "CREATE TABLE IF NOT EXISTS visits (id SERIAL PRIMARY KEY); SELECT count(*) FROM visits;"
 ```
 
-(On démarre Postgres avant l'appli : l'appli retente la connexion
-pendant 20 secondes si la base n'est pas encore prête, mais ce n'est
-qu'un filet de sécurité — en vrai on utiliserait plutôt un **init
-container** qui attend explicitement que la base soit joignable avant
-de démarrer le conteneur principal.)
+`postgres-1` affiche `0`, pas le compte de `postgres-0`. **Chaque Pod a
+sa propre base de données, totalement indépendante**, avec son propre
+disque vide au démarrage. Un StatefulSet donne la *mécanique* (identité,
+stockage stable) pour faire tourner un système distribué avec état, mais
+il **n'implémente aucune réplication** : vanille Postgres ne sait pas se
+synchroniser tout seul entre plusieurs Pods. Pour une vraie HA Postgres
+sur Kubernetes, on s'appuie sur un opérateur dédié qui configure la
+réplication en streaming et l'élection du primaire (CloudNativePG,
+Zalando postgres-operator, Patroni...) — un StatefulSet est la fondation
+sur laquelle ces opérateurs sont construits, pas un remplaçant.
+
+C'est exactement pour ça que `k8s/db-config.yaml` pointe explicitement
+sur `postgres-0.postgres` plutôt que sur le Service `postgres` : si
+l'appli se connectait au nom du Service headless, la résolution DNS
+renverrait les IP des **deux** Pods, et selon lequel le client choisit,
+elle verrait tantôt une base, tantôt l'autre — un bug d'incohérence
+silencieux. En pointant sur le Pod `-0` explicitement, on garde une
+unique source de vérité, comme avant.
+
+Applique le changement de ConfigMap à l'appli :
 
 ```bash
+kubectl apply -f k8s/db-config.yaml
+kubectl rollout restart deployment/web -n tutorial-app
 kubectl port-forward -n tutorial-app service/web 8080:80
 ```
 
-Rafraîchis http://localhost:8080 plusieurs fois : le compteur
-augmente, et le nom du Pod qui répond change (3 réplicas de `web`
-derrière le même Service) — mais le compteur, lui, reste cohérent,
-puisqu'il vit dans Postgres, pas dans le Pod.
-
-## Démonstration : la persistance, pour de vrai
+## Mise à jour et scale-down ordonnés
 
 ```bash
-kubectl delete pod -n tutorial-app -l app=postgres
-kubectl get pods -n tutorial-app -w
+kubectl scale statefulset postgres --replicas=1 -n tutorial-app
+kubectl get pods -n tutorial-app -l app=postgres
+kubectl get pvc -n tutorial-app
 ```
 
-Un nouveau Pod Postgres est recréé (comme à l'étape 2 pour `web`). Une
-fois prêt, recharge la page : **le compteur n'a pas été remis à zéro**.
-Les données vivent dans le PV, pas dans le Pod — c'est tout l'objet de
-cette étape.
-
-Compare avec la suppression du PVC lui-même :
+`postgres-1` (le plus grand ordinal) est supprimé en premier — et son
+PVC **reste présent** : par défaut, un StatefulSet ne supprime jamais
+les PVC de ses `volumeClaimTemplates`, ni au scale-down ni même si tu
+supprimes le StatefulSet entier (c'est volontaire, pour ne jamais perdre
+des données par accident). Il faut les supprimer explicitement :
 
 ```bash
-kubectl delete -f k8s/postgres-deployment.yaml
-kubectl delete pvc postgres-data -n tutorial-app
-kubectl apply -f k8s/postgres-pvc.yaml -f k8s/postgres-deployment.yaml
+kubectl delete pvc postgres-data-postgres-1 -n tutorial-app
 ```
 
-Cette fois un **nouveau** PV est provisionné vide : le compteur repart
-de zéro. La règle est : le cycle de vie du **stockage** suit le PVC, pas
-le Pod — supprimer le PVC (ou son PV) supprime les données.
+(Note : depuis Kubernetes 1.27, le champ
+`spec.persistentVolumeClaimRetentionPolicy` permet de changer ce
+comportement par défaut — `whenScaled`/`whenDeleted` à `Delete` au lieu
+de `Retain` — mais `Retain` reste le défaut, par sécurité.)
 
-## Reclaim Policy
-
-Quand un PVC est supprimé, que devient le PV sous-jacent ?
-
-- **`Delete`** (par défaut avec la plupart des provisioners dynamiques,
-  dont celui de minikube) : le PV et le stockage physique sont détruits.
-- **`Retain`** : le PV reste, à l'état `Released`, données intactes,
-  mais il faut une intervention manuelle pour le réutiliser.
+Remets 2 répliques pour la suite si tu veux, ou reste à 1 — la ConfigMap
+pointe toujours sur `postgres-0`, qui existe dans les deux cas.
 
 ```bash
-kubectl get pv -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy
+kubectl scale statefulset postgres --replicas=2 -n tutorial-app
 ```
 
-## Et pour plusieurs répliques de base de données ?
-
-Une seule instance Postgres avec un Deployment classique, comme ici,
-est volontairement simplifié. Pour répliquer une base de données (ou
-tout système où chaque instance a une identité et un stockage propres),
-Kubernetes a une ressource dédiée : le **StatefulSet**. Contrairement à
-un Deployment, chaque Pod d'un StatefulSet garde un nom stable
-(`postgres-0`, `postgres-1`...) et **son propre** PVC, recréé
-automatiquement avec le même nom à chaque redémarrage — généralement
-combiné à un Service headless (vu à l'étape 4) pour que chaque instance
-soit adressable individuellement. Hors du cadre de ce tuto, mais c'est
-la suite logique si tu veux creuser.
-
-## Nettoyer
+## Étape suivante
 
 ```bash
-minikube delete
+git checkout step-10-ingress
+cat STEP.md
 ```
 
-(Supprime tout le cluster, y compris les PV provisionnés dynamiquement.)
-
-## Fin du tutoriel — pour aller plus loin
-
-En partant d'une simple image Docker, on a maintenant :
-Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
-Secret → PersistentVolume, avec une appli qui scale, se met à jour sans
-coupure, expose du réseau proprement, sépare config/secrets/code, et
-persiste ses données.
-
-Pistes naturelles pour continuer : StatefulSet, Ingress (routage HTTP,
-HTTPS via les Secrets `kubernetes.io/tls` vus à l'étape 7), Horizontal
-Pod Autoscaler, Jobs/CronJobs, NetworkPolicy, Helm/Kustomize pour
-packager tout ce qu'on vient d'écrire à la main.
+On arrête d'utiliser `kubectl port-forward` pour de bon : place à
+l'**Ingress**, pour exposer l'appli sur un vrai nom d'hôte.

@@ -1,18 +1,13 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: tutorial-app
   labels:
     app: postgres
 spec:
-  replicas: 1
-  strategy:
-    # Recreate (pas RollingUpdate) : le volume est ReadWriteOnce, un seul
-    # Pod peut le monter à la fois. Un rolling update essaierait de démarrer
-    # le nouveau Pod avant de tuer l'ancien -> il resterait bloqué en attente
-    # du volume. Recreate tue l'ancien Pod avant de créer le nouveau.
-    type: Recreate
+  serviceName: postgres
+  replicas: 2
   selector:
     matchLabels:
       app: postgres
@@ -57,7 +52,12 @@ spec:
               command: ["pg_isready"]
             initialDelaySeconds: 15
             periodSeconds: 10
-      volumes:
-        - name: postgres-data
-          persistentVolumeClaim:
-            claimName: postgres-data
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
