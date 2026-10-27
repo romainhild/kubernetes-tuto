@@ -1,0 +1,15 @@
+# PersistentVolumeClaim : une "demande" de stockage, indépendante du cycle
+# de vie des Pods. minikube fournit un provisioner par défaut (storage
+# class "standard") qui crée automatiquement un PersistentVolume en
+# hostPath pour satisfaire cette demande (provisioning dynamique).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: tutorial-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

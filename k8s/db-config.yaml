@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-config
+  namespace: tutorial-app
+data:
+  WELCOME_MESSAGE: "Bonjour depuis Kubernetes, avec une vraie base de données !"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "tutorial"
+  DB_USER: "tutorial_user"

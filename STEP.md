@@ -1,102 +1,175 @@
-# Étape 7 — Le Secret
+# Étape 8 — PersistentVolume, PersistentVolumeClaim, et une vraie base de données
 
-Un **Secret** ressemble énormément à un ConfigMap (même structure, même
-façon de le consommer en env var ou en volume) — mais il existe une
-différence de fond à bien comprendre tout de suite :
+Dernière couche : on remplace la page statique par une petite appli
+Python (Flask) qui compte ses visites dans une base **Postgres**, et on
+apprend comment Kubernetes gère le stockage qui doit **survivre** à la
+suppression d'un Pod — ce qu'aucune des ressources vues jusqu'ici ne
+permettait (un Pod recréé repart toujours de zéro).
 
-> **Un Secret n'est PAS chiffré par défaut.** Ses valeurs sont juste
-> encodées en base64 dans etcd (la base de données du cluster) — le
-> base64 est un encodage, pas un chiffrement, n'importe qui peut le
-> décoder instantanément. La vraie protection vient d'ailleurs :
-> - le chiffrement au repos dans etcd doit être activé explicitement par
->   l'administrateur du cluster (`--encryption-provider-config`),
-> - et le RBAC doit restreindre qui a le droit de lire les Secrets
->   (`get`/`list` sur la ressource `secrets`).
->
-> Dans beaucoup d'organisations, les vrais secrets de prod ne sont de
-> toute façon pas stockés en clair dans un manifeste Kubernetes, mais
-> injectés depuis un gestionnaire externe (Vault, AWS Secrets Manager,
-> Sealed Secrets, External Secrets Operator...).
+## Vue d'ensemble de ce qui change
 
-## Nouveau fichier
+- Nouvelle appli : `app/counter/` (Flask + psycopg2), qui remplace
+  `nginx` dans le Deployment `web`.
+- `k8s/db-config.yaml` et `k8s/db-secret.yaml` remplacent
+  `web-content`/`web-secret` : mêmes idées que les étapes 6 et 7, mais
+  leurs clés sont maintenant **partagées entre deux Deployments**
+  différents (l'appli et Postgres).
+- `k8s/postgres-pvc.yaml`, `k8s/postgres-deployment.yaml`,
+  `k8s/postgres-service.yaml` : la base de données elle-même.
+- `k8s/deployment.yaml` : le Deployment `web` utilise maintenant l'image
+  du compteur et se connecte à Postgres.
 
-- `k8s/secret.yaml` — un Secret `Opaque` (le type "générique", pour une
-  donnée sans structure particulière) contenant un faux token d'API.
+## PersistentVolume, PersistentVolumeClaim, StorageClass : qui fait quoi
 
-On utilise ici `stringData` plutôt que `data` : avec `stringData`, tu
-écris la valeur en clair dans le YAML et Kubernetes l'encode en base64
-pour toi au moment de la création. Avec `data`, tu dois fournir toi-même
-la valeur déjà encodée (`echo -n "valeur" | base64`). `stringData` est
-en écriture seule — en relisant le Secret (`kubectl get secret ... -o
-yaml`), tu verras toujours la version encodée sous `data`.
+Trois objets différents, souvent confondus :
 
-Et `k8s/deployment.yaml` consomme ce Secret exactement comme la
-ConfigMap, via `secretKeyRef` :
+- **`PersistentVolume` (PV)** : un morceau de stockage réel (un disque,
+  un export NFS, un hostPath...), une ressource *cluster-wide* (pas dans
+  un namespace). Quelqu'un (un admin, ou un provisioner automatique) doit
+  le créer.
+- **`PersistentVolumeClaim` (PVC)** : une **demande** de stockage faite
+  par un utilisateur/une appli ("je veux 1Gi, en ReadWriteOnce"). C'est
+  namespacé, et c'est ce qu'on référence depuis un Pod.
+- **`StorageClass`** : un "profil" qui dit *comment* provisionner un PV
+  automatiquement quand un PVC le demande (quel type de disque, quel
+  driver...). C'est le **provisioning dynamique** : plus besoin de créer
+  les PV à la main, le cluster le fait dès qu'un PVC apparaît.
 
-```yaml
-- name: API_TOKEN
-  valueFrom:
-    secretKeyRef:
-      name: web-secret
-      key: API_TOKEN
-```
-
-## Essayer
+Dans ce tuto on ne crée aucun PV ni StorageClass : minikube a déjà une
+StorageClass par défaut (`standard`, basée sur `hostPath`) qui
+provisionne automatiquement un PV dès que `k8s/postgres-pvc.yaml` est
+appliqué. C'est le cas le plus courant en pratique.
 
 ```bash
-kubectl apply -f k8s/secret.yaml
-kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/postgres-pvc.yaml
+kubectl get pvc -n tutorial-app
+kubectl get pv
+```
+
+Tu verras le PVC passer en `Bound`, lié à un PV créé automatiquement.
+
+## Les Access Modes
+
+- **`ReadWriteOnce` (RWO)** : monté en lecture/écriture par **un seul
+  nœud** à la fois (pas "un seul Pod" strictement — plusieurs Pods sur
+  le même nœud peuvent le partager, mais c'est rare en pratique). C'est
+  le mode qu'on utilise ici pour Postgres, et le plus répandu
+  (disques cloud classiques : EBS, Persistent Disk...).
+- **`ReadOnlyMany` (ROX)** : plusieurs nœuds en lecture seule.
+- **`ReadWriteMany` (RWX)** : plusieurs nœuds en lecture/écriture —
+  demande un backend qui le supporte vraiment (NFS, EFS, Filestore...),
+  pas les disques blocs classiques.
+
+## Pourquoi `strategy: Recreate` sur le Deployment Postgres
+
+Regarde `k8s/postgres-deployment.yaml` : contrairement au Deployment
+`web`, sa stratégie est `Recreate`, pas `RollingUpdate`. Avec un volume
+`ReadWriteOnce`, un rolling update voudrait démarrer le nouveau Pod
+*avant* de couper l'ancien — mais le nouveau Pod resterait bloqué en
+`Pending`, incapable de monter un volume déjà attaché à l'ancien Pod.
+`Recreate` supprime l'ancien avant de créer le nouveau : une courte
+coupure, mais pas de blocage.
+
+(Note au passage : `PGDATA` est réglé sur un sous-dossier
+`/var/lib/postgresql/data/pgdata` plutôt que la racine du volume monté —
+certains backends de volume y créent un dossier `lost+found` que
+Postgres refuse de voir à la racine de son data dir.)
+
+## Construire et déployer
+
+```bash
+minikube image build -t local/k8s-tutorial-counter:dev app/counter/
+
+kubectl apply -f k8s/db-config.yaml -f k8s/db-secret.yaml
+kubectl apply -f k8s/postgres-pvc.yaml -f k8s/postgres-deployment.yaml -f k8s/postgres-service.yaml
+kubectl rollout status deployment/postgres -n tutorial-app
+
+kubectl apply -f k8s/deployment.yaml -f k8s/service-clusterip.yaml
 kubectl rollout status deployment/web -n tutorial-app
 ```
 
-Regarde le Secret tel que stocké :
+(On démarre Postgres avant l'appli : l'appli retente la connexion
+pendant 20 secondes si la base n'est pas encore prête, mais ce n'est
+qu'un filet de sécurité — en vrai on utiliserait plutôt un **init
+container** qui attend explicitement que la base soit joignable avant
+de démarrer le conteneur principal.)
 
 ```bash
-kubectl get secret web-secret -n tutorial-app -o yaml
+kubectl port-forward -n tutorial-app service/web 8080:80
 ```
 
-La valeur apparaît encodée en base64. Décode-la pour constater qu'il
-n'y a aucune protection cryptographique :
+Rafraîchis http://localhost:8080 plusieurs fois : le compteur
+augmente, et le nom du Pod qui répond change (3 réplicas de `web`
+derrière le même Service) — mais le compteur, lui, reste cohérent,
+puisqu'il vit dans Postgres, pas dans le Pod.
+
+## Démonstration : la persistance, pour de vrai
 
 ```bash
-kubectl get secret web-secret -n tutorial-app -o jsonpath='{.data.API_TOKEN}' | base64 -d
+kubectl delete pod -n tutorial-app -l app=postgres
+kubectl get pods -n tutorial-app -w
 ```
 
-Et vérifie que le Pod a bien reçu la valeur en clair en variable d'env
-(c'est le conteneur qui la voit en clair, le chiffrement/RBAC protège
-l'accès *au Secret lui-même*, pas son utilisation dans le Pod) :
+Un nouveau Pod Postgres est recréé (comme à l'étape 2 pour `web`). Une
+fois prêt, recharge la page : **le compteur n'a pas été remis à zéro**.
+Les données vivent dans le PV, pas dans le Pod — c'est tout l'objet de
+cette étape.
+
+Compare avec la suppression du PVC lui-même :
 
 ```bash
-kubectl exec -n tutorial-app deploy/web -- env | grep API_TOKEN
+kubectl delete -f k8s/postgres-deployment.yaml
+kubectl delete pvc postgres-data -n tutorial-app
+kubectl apply -f k8s/postgres-pvc.yaml -f k8s/postgres-deployment.yaml
 ```
 
-## Les autres types de Secret
+Cette fois un **nouveau** PV est provisionné vide : le compteur repart
+de zéro. La règle est : le cycle de vie du **stockage** suit le PVC, pas
+le Pod — supprimer le PVC (ou son PV) supprime les données.
 
-Le `type` d'un Secret ne change pas le stockage (toujours juste du
-base64), mais aide Kubernetes et les outils à valider sa structure :
+## Reclaim Policy
 
-- **`Opaque`** (défaut) : structure libre, clé/valeur quelconques.
-- **`kubernetes.io/tls`** : attend exactement les clés `tls.crt` et
-  `tls.key` — c'est le format qu'un Ingress consomme pour servir du
-  HTTPS. Exemple de forme (non appliqué) dans
-  `k8s/secret-tls-example.yaml`.
-- **`kubernetes.io/dockerconfigjson`** : credentials pour tirer une
-  image depuis un registry Docker privé (`imagePullSecrets` sur un
-  Pod).
-- **`kubernetes.io/basic-auth`** / **`kubernetes.io/ssh-auth`** :
-  structures prédéfinies pour des identifiants basic-auth ou une clé SSH.
-- **`kubernetes.io/service-account-token`** : créé automatiquement par
-  Kubernetes pour authentifier un Pod auprès de l'API server.
+Quand un PVC est supprimé, que devient le PV sous-jacent ?
 
-## Ce qu'on va en faire ensuite
-
-À l'étape suivante, on ajoute une vraie base de données — et son mot de
-passe sera, sans surprise, stocké dans un Secret plutôt qu'une
-ConfigMap.
-
-## Étape suivante
+- **`Delete`** (par défaut avec la plupart des provisioners dynamiques,
+  dont celui de minikube) : le PV et le stockage physique sont détruits.
+- **`Retain`** : le PV reste, à l'état `Released`, données intactes,
+  mais il faut une intervention manuelle pour le réutiliser.
 
 ```bash
-git checkout step-8-database-pv
-cat STEP.md
+kubectl get pv -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy
 ```
+
+## Et pour plusieurs répliques de base de données ?
+
+Une seule instance Postgres avec un Deployment classique, comme ici,
+est volontairement simplifié. Pour répliquer une base de données (ou
+tout système où chaque instance a une identité et un stockage propres),
+Kubernetes a une ressource dédiée : le **StatefulSet**. Contrairement à
+un Deployment, chaque Pod d'un StatefulSet garde un nom stable
+(`postgres-0`, `postgres-1`...) et **son propre** PVC, recréé
+automatiquement avec le même nom à chaque redémarrage — généralement
+combiné à un Service headless (vu à l'étape 4) pour que chaque instance
+soit adressable individuellement. Hors du cadre de ce tuto, mais c'est
+la suite logique si tu veux creuser.
+
+## Nettoyer
+
+```bash
+minikube delete
+```
+
+(Supprime tout le cluster, y compris les PV provisionnés dynamiquement.)
+
+## Fin du tutoriel — pour aller plus loin
+
+En partant d'une simple image Docker, on a maintenant :
+Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
+Secret → PersistentVolume, avec une appli qui scale, se met à jour sans
+coupure, expose du réseau proprement, sépare config/secrets/code, et
+persiste ses données.
+
+Pistes naturelles pour continuer : StatefulSet, Ingress (routage HTTP,
+HTTPS via les Secrets `kubernetes.io/tls` vus à l'étape 7), Horizontal
+Pod Autoscaler, Jobs/CronJobs, NetworkPolicy, Helm/Kustomize pour
+packager tout ce qu'on vient d'écrire à la main.

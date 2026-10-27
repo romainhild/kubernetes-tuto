@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: local/k8s-tutorial-web:dev
+          image: local/k8s-tutorial-counter:dev
           imagePullPolicy: Never
           ports:
             - containerPort: 80
@@ -30,30 +30,47 @@ spec:
             - name: WELCOME_MESSAGE
               valueFrom:
                 configMapKeyRef:
-                  name: web-content
+                  name: db-config
                   key: WELCOME_MESSAGE
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: db-config
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: db-config
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: db-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: db-config
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: DB_PASSWORD
             - name: API_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: web-secret
+                  name: db-secret
                   key: API_TOKEN
-          volumeMounts:
-            - name: web-content
-              mountPath: /usr/share/nginx/html/index.html
-              subPath: index.html
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: 80
-            initialDelaySeconds: 1
+            initialDelaySeconds: 2
             periodSeconds: 3
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: 80
             initialDelaySeconds: 5
             periodSeconds: 10
-      volumes:
-        - name: web-content
-          configMap:
-            name: web-content
