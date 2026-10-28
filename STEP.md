@@ -153,23 +153,13 @@ combiné à un Service headless (vu à l'étape 4) pour que chaque instance
 soit adressable individuellement. Hors du cadre de ce tuto, mais c'est
 la suite logique si tu veux creuser.
 
-## Nettoyer
+## Étape suivante
 
 ```bash
-minikube delete
+git checkout step-9-statefulset
+cat STEP.md
 ```
 
-(Supprime tout le cluster, y compris les PV provisionnés dynamiquement.)
-
-## Fin du tutoriel — pour aller plus loin
-
-En partant d'une simple image Docker, on a maintenant :
-Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
-Secret → PersistentVolume, avec une appli qui scale, se met à jour sans
-coupure, expose du réseau proprement, sépare config/secrets/code, et
-persiste ses données.
-
-Pistes naturelles pour continuer : StatefulSet, Ingress (routage HTTP,
-HTTPS via les Secrets `kubernetes.io/tls` vus à l'étape 7), Horizontal
-Pod Autoscaler, Jobs/CronJobs, NetworkPolicy, Helm/Kustomize pour
-packager tout ce qu'on vient d'écrire à la main.
+On vient de limiter Postgres à 1 réplique pour éviter les complications
+d'un Deployment classique sur un volume partagé. L'étape suivante
+introduit la ressource faite pour ça : le **StatefulSet**.
