@@ -46,6 +46,8 @@ minikube delete
 | [`step-9-statefulset`](../../tree/step-9-statefulset) | Le StatefulSet |
 | [`step-10-ingress`](../../tree/step-10-ingress) | L'Ingress |
 | [`step-11-helm`](../../tree/step-11-helm) | Helm |
+| [`step-12-rbac`](../../tree/step-12-rbac) | RBAC (ServiceAccount, Role, RoleBinding) |
+| [`step-13-hpa`](../../tree/step-13-hpa) | Le HorizontalPodAutoscaler |
 
 Chaque branche a, à sa racine, un fichier **`STEP.md`** qui explique :
 - le concept introduit, pourquoi il existe et le problème qu'il résout,
