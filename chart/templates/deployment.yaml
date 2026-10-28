@@ -5,7 +5,12 @@ metadata:
   labels:
     app: web
 spec:
+  {{- if not .Values.web.autoscaling.enabled }}
+  # Si le HPA gère les réplicas, on ne fixe plus "replicas" ici : sinon
+  # chaque "helm upgrade" écraserait le nombre de Pods choisi par le HPA et
+  # repartirait de web.replicaCount, en conflit permanent avec l'autoscaler.
   replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app: web
@@ -26,6 +31,13 @@ spec:
           imagePullPolicy: {{ .Values.web.image.pullPolicy }}
           ports:
             - containerPort: 80
+          resources:
+            requests:
+              cpu: {{ .Values.web.resources.requests.cpu }}
+              memory: {{ .Values.web.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.web.resources.limits.cpu }}
+              memory: {{ .Values.web.resources.limits.memory }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

@@ -1,143 +1,144 @@
-# Étape 12 — RBAC
+# Étape 13 — Le HorizontalPodAutoscaler
 
-Jusqu'ici, nos Pods ne parlaient qu'à Postgres. Beaucoup d'applis réelles
-ont besoin d'appeler l'**API Kubernetes elle-même** (lister des Pods,
-lire une ConfigMap, créer un Job comme dans l'exemple Airflow qu'on a
-esquissé...). **RBAC** (Role-Based Access Control) contrôle qui a le
-droit de faire quoi sur l'API — "qui" pouvant être un humain, mais aussi
-un Pod.
+Jusqu'ici, le nombre de réplicas de `web` était une valeur fixe
+(`web.replicaCount` dans `values.yaml`). Un **HorizontalPodAutoscaler**
+(HPA) ajuste ce nombre automatiquement, à la hausse comme à la baisse,
+en fonction d'une métrique observée — ici, l'utilisation CPU.
 
-## Nouveau dans l'appli
+## Pré-requis : un fournisseur de métriques
 
-L'appli expose maintenant un troisième morceau d'info sur sa page : elle
-interroge l'API Kubernetes pour lister les autres Pods portant le label
-`app=web` (voir `get_peer_info()` dans `app/counter/app.py`, via le
-client Python officiel `kubernetes`). C'est exactement le genre d'appel
-qui déclenche RBAC.
+Le HPA ne mesure rien lui-même : il lit l'API `metrics.k8s.io`, que
+minikube n'active pas par défaut.
 
-(Détail au passage : l'appli doit savoir dans quel namespace elle tourne
-pour filtrer les Pods. Plutôt que de le coder en dur, `chart/templates/deployment.yaml`
-utilise la **Downward API** pour l'injecter automatiquement :
-`valueFrom.fieldRef.fieldPath: metadata.namespace` — un Pod peut
-toujours connaître ses propres métadonnées sans configuration
-supplémentaire, où qu'il soit déployé.)
+```bash
+minikube addons enable metrics-server
+kubectl top pods -n tutorial-app   # doit afficher du CPU/mémoire, pas une erreur
+```
 
-## Comment un Pod s'authentifie auprès de l'API
+(`kubectl top` qui échoue est le symptôme numéro un d'un HPA qui reste
+bloqué sur `<unknown>` — vois plus bas.)
 
-Par défaut, **chaque Pod** se voit automatiquement monter un token
-appartenant à un **ServiceAccount** (celui du namespace nommé
-`default` si tu n'en précises pas un), dans
-`/var/run/secrets/kubernetes.io/serviceaccount/`. C'est ce que
-`config.load_incluster_config()` lit côté client Python — c'est pour ça
-que notre appli n'a besoin d'aucune URL/credentials codés en dur pour
-parler à l'API : le token et l'adresse de l'API sont déjà là, injectés
-par Kubernetes lui-même.
+## Ce qui change
 
-Avoir un token ne donne **aucune permission** par défaut (RBAC est
-"deny by default") — il faut explicitement lier ce ServiceAccount à des
-droits via un `RoleBinding`.
-
-## Les 4 objets RBAC
-
-- **`ServiceAccount`** : l'identité du Pod (`chart/templates/serviceaccount.yaml`,
-  nommé `web`, référencé par `serviceAccountName: web` dans le
-  Deployment).
-- **`Role`** : une liste de permissions, **namespacée** — s'applique
-  uniquement dans le namespace où elle est créée.
-  (`chart/templates/rbac.yaml`, verbes `get`/`list`/`watch` sur les
-  `pods`.)
-- **`ClusterRole`** : la même chose, mais cluster-wide (ou pour des
-  ressources elles-mêmes non-namespacées, comme `Node` ou `Namespace`).
-  On n'en a pas besoin ici : notre appli n'a besoin de voir que les Pods
-  de son propre namespace. Un controller comme `ingress-nginx` (étape
-  10) ou un scraper Prometheus qui découvre des cibles dans tout le
-  cluster, eux, ont besoin d'un ClusterRole.
-- **`RoleBinding`** / **`ClusterRoleBinding`** : relie un Role/ClusterRole
-  à un ou plusieurs "subjects" (`ServiceAccount`, `User`, ou `Group`).
-  Sans binding, un Role ne s'applique à personne.
-
-Règle simple : namespaced + namespaced (Role + RoleBinding) pour limiter
-la portée au namespace ; ClusterRole peut être réutilisé par plusieurs
-RoleBindings namespacés différents (pratique : un seul ClusterRole
-"pod-reader" réutilisable, lié namespace par namespace) ou par un
-ClusterRoleBinding pour une portée vraiment globale.
+- `chart/templates/hpa.yaml` (nouveau) : le HPA, togglable via
+  `web.autoscaling.enabled`.
+- `chart/templates/deployment.yaml` :
+  - ajout de `resources.requests`/`limits` sur le conteneur — **obligatoire**
+    pour le HPA : "80% d'utilisation CPU" ne veut rien dire sans un
+    `request.cpu` de référence à partir duquel calculer ce pourcentage.
+  - le champ `replicas:` devient conditionnel
+    (`{{- if not .Values.web.autoscaling.enabled }}`) : si on le
+    laissait toujours à `web.replicaCount`, chaque `helm upgrade`
+    écraserait le nombre de Pods décidé par le HPA et repartirait de la
+    valeur fixe — un conflit permanent entre Helm et l'autoscaler.
 
 ## Essayer
 
 ```bash
 helm upgrade tuto chart/ --namespace tutorial-app
-kubectl port-forward -n tutorial-app service/web 8080:80
-curl -s http://localhost:8080/ | grep "API Kubernetes"
+kubectl get hpa -n tutorial-app -w
 ```
 
-Tu dois voir la liste des Pods `web-xxxxx`.
+Colonnes à surveiller : `TARGETS` (utilisation actuelle / cible, ex.
+`3%/50%`) et `REPLICAS`. Si `TARGETS` reste bloqué sur `<unknown>/50%`
+pendant plus d'une minute, c'est que `metrics-server` n'est pas prêt ou
+pas activé — revérifie `kubectl top pods`.
 
-Vérifie les objets créés :
+## Générer de la charge pour voir le scale-up
 
 ```bash
-kubectl get serviceaccount,role,rolebinding -n tutorial-app
-kubectl describe role web-pod-reader -n tutorial-app
+kubectl create deployment load-generator -n tutorial-app \
+  --image=busybox:1.36 --replicas=4 -- \
+  /bin/sh -c "while true; do wget -q -O- http://web >/dev/null; done"
+
+kubectl get hpa -n tutorial-app -w
 ```
 
-Et la commande la plus utile pour déboguer RBAC — simuler "est-ce que ce
-ServiceAccount peut faire X" sans avoir à redéployer quoi que ce soit :
+Après quelques dizaines de secondes, `TARGETS` dépasse 50% et
+`REPLICAS` grimpe au-delà de `minReplicas` (jusqu'à `maxReplicas=4` max
+ici). Vérifie en parallèle :
 
 ```bash
-kubectl auth can-i list pods \
-  --as=system:serviceaccount:tutorial-app:web -n tutorial-app
+kubectl get pods -n tutorial-app -l app=web
 ```
 
-## Casser puis réparer
-
-Le chart a un flag `rbac.create` justement pour ça :
+Arrête la charge :
 
 ```bash
-helm upgrade tuto chart/ --namespace tutorial-app --set rbac.create=false
-kubectl get role,rolebinding -n tutorial-app   # plus rien
-curl -s http://localhost:8080/ | grep "API Kubernetes"
+kubectl delete deployment load-generator -n tutorial-app
 ```
 
-Le ServiceAccount `web` existe toujours (le Deployment le référence
-toujours), mais sans Role ni RoleBinding, l'appel est refusé — tu
-devrais voir le message "refusé par RBAC (HTTP 403)" généré par
-`get_peer_info()`. Note que **l'appli ne crashe pas** : elle capture
-l'erreur et l'affiche, exactement comme on gérerait un service externe
-indisponible.
+`REPLICAS` redescend, mais **pas tout de suite** : par design, le
+scale-down a un délai de stabilisation (5 minutes par défaut) pour
+éviter du "flapping" (scale up/down en boucle sur un pic de charge
+court). Réglable via `behavior.scaleDown.stabilizationWindowSeconds`
+dans le spec du HPA — pas configuré ici pour rester simple, mais bon à
+savoir.
+
+## Comment le HPA décide
+
+Toutes les ~15 secondes (le contrôleur n'est pas instantané), pour une
+métrique de type `Resource` :
+
+```
+désiré = ceil(réplicas_actuels × (valeur_actuelle / valeur_cible))
+```
+
+Borné entre `minReplicas` et `maxReplicas`. C'est pour ça qu'on ne met
+jamais `minReplicas: 0` avec ce genre de métrique : s'il y a 0 Pod, il
+n'y a aucune métrique à mesurer pour décider de remonter.
+
+## Les autres types de métriques (API `autoscaling/v2`)
+
+- **`Resource`** (notre cas) : CPU ou mémoire, lu depuis `metrics-server`
+  — pas besoin d'instrumenter l'appli.
+- **`Pods`** : une métrique personnalisée, moyennée par Pod (ex: requêtes/seconde
+  par Pod).
+- **`Object`** : une métrique lue sur un *autre* objet Kubernetes (ex: la
+  longueur d'une file portée par un Service).
+- **`External`** : une métrique qui ne vient pas du cluster du tout (ex:
+  la profondeur d'une queue SQS).
+
+Les trois derniers types demandent un **adaptateur de métriques**
+personnalisé (le plus courant : `prometheus-adapter`, qui expose des
+métriques Prometheus via l'API `custom.metrics.k8s.io`) — `metrics-server`
+seul ne fournit que CPU/mémoire. C'est exactement ce qu'il faudrait pour
+le serveur d'inférence BentoML esquissé plus tôt : scaler sur le nombre
+de requêtes/seconde ou la latency p99 plutôt que sur le CPU, en
+branchant son endpoint `/metrics` à Prometheus puis Prometheus à
+`prometheus-adapter`.
+
+## Et la mémoire, les nœuds ?
+
+Mentionné pour la carte mentale, pas implémenté ici :
+
+- **VerticalPodAutoscaler (VPA)** : au lieu de changer le *nombre* de
+  Pods, ajuste leurs `requests`/`limits` CPU/mémoire — complémentaire au
+  HPA (en pratique, les deux en même temps sur la *même* métrique CPU
+  sont déconseillés, ils se marchent sur les pieds).
+- **Cluster Autoscaler** : ajoute/retire des **nœuds** quand les Pods ne
+  trouvent plus de place à scheduler — un niveau au-dessus du HPA (qui
+  ne crée jamais de nœud, juste des Pods, qui peuvent rester `Pending`
+  si le cluster est plein).
+
+## Nettoyer
 
 ```bash
-helm upgrade tuto chart/ --namespace tutorial-app --set rbac.create=true
+kubectl delete deployment load-generator -n tutorial-app 2>/dev/null
+helm uninstall tuto -n tutorial-app
+minikube delete
 ```
 
-(ou simplement ré-applique sans `--set`, `true` est la valeur par défaut
-dans `values.yaml`.)
+---
 
-## Le principe du moindre privilège
+Fin du tutoriel. En partant d'une simple image Docker, on a traversé :
 
-Remarque ce qu'on **n'a pas** donné au Role : pas de `create`, pas de
-`delete`, pas de `update`, pas d'accès aux `secrets` ou aux
-`configmaps`, uniquement `get`/`list`/`watch` sur les `pods`. Une appli
-ne devrait jamais avoir plus de droits que ce dont elle a réellement
-besoin — un Pod compromis avec un ClusterRole `cluster-admin` serait une
-porte ouverte vers tout le cluster, alors qu'un Pod compromis avec notre
-Role n'expose au pire que la liste des noms de Pods du namespace.
+Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
+Secret → PersistentVolume → StatefulSet → Ingress → Helm → RBAC →
+HorizontalPodAutoscaler
 
-Si un Pod n'a besoin d'appeler l'API Kubernetes pour rien du tout
-(la plupart des cas), il vaut mieux désactiver complètement le montage
-du token plutôt que de laisser le ServiceAccount `default` traîner :
-
-```yaml
-automountServiceAccountToken: false
-```
-
-(dans `spec.template.spec`, à côté de `serviceAccountName`.)
-
-## Étape suivante
-
-```bash
-git checkout step-13-hpa
-cat STEP.md
-```
-
-On vient d'ajouter un appel réseau par requête (vers l'API Kubernetes)
-en plus de la base — bon prétexte pour parler de scaling automatique :
-le **HorizontalPodAutoscaler**.
+— les briques qu'on retrouve dans la quasi-totalité des applications
+tournant sur Kubernetes en production, y compris dans des stacks bien
+plus riches (voir l'esquisse de plateforme ML : MLflow, Postgres,
+MinIO, BentoML, Prometheus/Grafana, Airflow — chacun de ses morceaux se
+ramène à un sous-ensemble de ce qu'on vient de pratiquer ici).
