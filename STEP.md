@@ -166,10 +166,14 @@ de charts). En pratique, les options courantes sont :
 - **`helm package`** + un dépôt de charts (ChartMuseum, OCI registry...)
   pour distribuer un chart versionné à d'autres équipes.
 
----
+## Étape suivante
 
-Fin du tutoriel. Depuis une simple image Docker, on est passé par
-Pod → ReplicaSet → Deployment → Service → Namespace → ConfigMap →
-Secret → PersistentVolume → StatefulSet → Ingress → Helm — les briques
-de base qu'on retrouve dans la quasi-totalité des applications tournant
-sur Kubernetes en production.
+```bash
+git checkout step-12-rbac
+cat STEP.md
+```
+
+On a maintenant un chart propre pour déployer l'appli. Reste deux
+sujets qui reviennent dès qu'une appli a besoin de parler à l'API
+Kubernetes elle-même, ou de scaler automatiquement : **RBAC**, puis le
+**HorizontalPodAutoscaler**.
